@@ -1,0 +1,63 @@
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-cv_analyzer}
+      POSTGRES_USER: ${POSTGRES_USER:-cv_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-this-password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - cvnet
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://${POSTGRES_USER:-cv_admin}:${POSTGRES_PASSWORD:-change-this-password}@db:5432/${POSTGRES_DB:-cv_analyzer}}
+      JWT_SECRET: ${JWT_SECRET:?Set JWT_SECRET in .env before starting V15}
+      JWT_EXPIRES_HOURS: ${JWT_EXPIRES_HOURS:-8}
+      AUTO_CREATE_DB: "false"
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080,http://127.0.0.1:8080}
+      UVICORN_WORKERS: ${UVICORN_WORKERS:-2}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5).read()"]
+      interval: 10s
+      timeout: 8s
+      start_period: 45s
+      retries: 10
+    networks:
+      - cvnet
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    networks:
+      - cvnet
+
+volumes:
+  postgres_data:
+
+networks:
+  cvnet:
+    driver: bridge

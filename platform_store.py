@@ -1,0 +1,502 @@
+"""V12 persistence layer.
+
+Public method names intentionally match V11 so the FastAPI API contract does
+not need to change when moving from SQLite to PostgreSQL.
+"""
+from __future__ import annotations
+
+import os
+import uuid
+from typing import Any, Dict, List, Optional
+
+from sqlalchemy import select
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session, sessionmaker
+
+from database import SessionLocal, create_db_engine, get_database_url
+from models import Application, AuditLog, Base, Candidate, EvaluationRun, Job, User
+
+
+def utc_now() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _user(row: User) -> Dict[str, Any]:
+    return {
+        "id": row.id,
+        "email": row.email,
+        "full_name": row.full_name,
+        "password_hash": row.password_hash,
+        "created_at": row.created_at,
+        "active": bool(row.active),
+    }
+
+
+def _user_public(row: User) -> Dict[str, Any]:
+    item = _user(row)
+    item.pop("password_hash", None)
+    return item
+
+
+def _job(row: Job) -> Dict[str, Any]:
+    return {
+        "id": row.id,
+        "owner_id": row.owner_id,
+        "title": row.title,
+        "company": row.company,
+        "description": row.description,
+        "status": row.status,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+def _candidate(row: Candidate) -> Dict[str, Any]:
+    return {
+        "id": row.id,
+        "owner_id": row.owner_id,
+        "name": row.name,
+        "email": row.email,
+        "phone": row.phone,
+        "linkedin": row.linkedin,
+        "github": row.github,
+        "resume_filename": row.resume_filename,
+        "resume_text": row.resume_text,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+def _application(row: Application, candidate: Candidate, *, include_resume_text: bool = False) -> Dict[str, Any]:
+    analysis = row.analysis_json
+    if isinstance(analysis, str):
+        import json
+
+        try:
+            analysis = json.loads(analysis)
+        except json.JSONDecodeError:
+            analysis = {}
+    item: Dict[str, Any] = {
+        "application_id": row.id,
+        "job_id": row.job_id,
+        "candidate_id": row.candidate_id,
+        "status": row.status,
+        "analysis": analysis if isinstance(analysis, dict) else {},
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+        "name": candidate.name,
+        "email": candidate.email,
+        "phone": candidate.phone,
+        "linkedin": candidate.linkedin,
+        "github": candidate.github,
+        "resume_filename": candidate.resume_filename,
+    }
+    if include_resume_text:
+        item["resume_text"] = candidate.resume_text
+    return item
+
+
+class PlatformStore:
+    """Repository used by V11/V12 API handlers.
+
+    Parameters are optional so tests can create an isolated SQLite database.
+    """
+
+    def __init__(
+        self,
+        db_path: str | None = None,
+        *,
+        database_url: str | None = None,
+        auto_create: bool | None = None,
+    ) -> None:
+        if database_url:
+            url = database_url
+        elif db_path:
+            url = f"sqlite:///{db_path.replace(chr(92), '/') }"
+        else:
+            url = get_database_url()
+
+        self.database_url = url
+        self.engine: Engine = create_db_engine(url)
+        self.SessionLocal: sessionmaker[Session] = sessionmaker(
+            bind=self.engine,
+            autoflush=False,
+            expire_on_commit=False,
+            class_=Session,
+        )
+
+        if auto_create is None:
+            auto_create = os.getenv("AUTO_CREATE_DB", "true").strip().lower() in {"1", "true", "yes", "on"}
+            if not url.startswith("sqlite") and "AUTO_CREATE_DB" not in os.environ:
+                auto_create = False
+        if auto_create:
+            Base.metadata.create_all(self.engine)
+
+    def create_schema(self) -> None:
+        Base.metadata.create_all(self.engine)
+
+    def dispose(self) -> None:
+        self.engine.dispose()
+
+    def _session(self) -> Session:
+        return self.SessionLocal()
+
+    def create_user(self, email: str, full_name: str, password_hash: str) -> Dict[str, Any]:
+        row = User(
+            id=str(uuid.uuid4()),
+            email=email.lower().strip(),
+            full_name=full_name.strip(),
+            password_hash=password_hash,
+            created_at=utc_now(),
+            active=True,
+        )
+        session = self._session()
+        try:
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return _user_public(row)
+        except IntegrityError as exc:
+            session.rollback()
+            raise ValueError("An account with this email already exists.") from exc
+        finally:
+            session.close()
+
+    def get_user_by_email(self, email: str) -> Optional[Dict[str, Any]]:
+        session = self._session()
+        try:
+            row = session.scalar(select(User).where(User.email == email.lower().strip()))
+            return _user(row) if row else None
+        finally:
+            session.close()
+
+    def get_user_public(self, user_id: str) -> Optional[Dict[str, Any]]:
+        session = self._session()
+        try:
+            row = session.get(User, user_id)
+            return _user_public(row) if row else None
+        finally:
+            session.close()
+
+    def create_job(self, owner_id: str, title: str, company: str, description: str) -> Dict[str, Any]:
+        row = Job(
+            id=str(uuid.uuid4()),
+            owner_id=owner_id,
+            title=title.strip(),
+            company=company.strip(),
+            description=description.strip(),
+            status="open",
+            created_at=utc_now(),
+            updated_at=utc_now(),
+        )
+        session = self._session()
+        try:
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return _job(row)
+        finally:
+            session.close()
+
+    def list_jobs(self, owner_id: str) -> List[Dict[str, Any]]:
+        session = self._session()
+        try:
+            rows = session.scalars(
+                select(Job).where(Job.owner_id == owner_id).order_by(Job.created_at.desc())
+            ).all()
+            return [_job(row) for row in rows]
+        finally:
+            session.close()
+
+    def get_job(self, owner_id: str, job_id: str) -> Optional[Dict[str, Any]]:
+        session = self._session()
+        try:
+            row = session.scalar(select(Job).where(Job.id == job_id, Job.owner_id == owner_id))
+            return _job(row) if row else None
+        finally:
+            session.close()
+
+    def update_job(self, owner_id: str, job_id: str, **fields: Any) -> Optional[Dict[str, Any]]:
+        allowed = {"title", "company", "description", "status"}
+        session = self._session()
+        try:
+            row = session.scalar(select(Job).where(Job.id == job_id, Job.owner_id == owner_id))
+            if not row:
+                return None
+            for key, value in fields.items():
+                if key in allowed and value is not None:
+                    setattr(row, key, value.strip() if isinstance(value, str) else value)
+            row.updated_at = utc_now()
+            session.commit()
+            session.refresh(row)
+            return _job(row)
+        finally:
+            session.close()
+
+    def delete_job(self, owner_id: str, job_id: str) -> bool:
+        session = self._session()
+        try:
+            row = session.scalar(select(Job).where(Job.id == job_id, Job.owner_id == owner_id))
+            if not row:
+                return False
+            session.delete(row)
+            session.commit()
+            return True
+        finally:
+            session.close()
+
+    def upsert_candidate(
+        self,
+        owner_id: str,
+        *,
+        name: str,
+        email: str,
+        phone: str,
+        linkedin: str,
+        github: str,
+        resume_filename: str,
+        resume_text: str,
+    ) -> Dict[str, Any]:
+        session = self._session()
+        try:
+            clean_email = (email or "").strip().lower()
+            row = None
+            if clean_email:
+                row = session.scalar(
+                    select(Candidate)
+                    .where(Candidate.owner_id == owner_id, Candidate.email == clean_email)
+                    .order_by(Candidate.created_at.desc())
+                )
+            now = utc_now()
+            if row:
+                row.name = (name or "").strip()
+                row.phone = (phone or "").strip()
+                row.linkedin = (linkedin or "").strip()
+                row.github = (github or "").strip()
+                row.resume_filename = resume_filename
+                row.resume_text = resume_text
+                row.updated_at = now
+            else:
+                row = Candidate(
+                    id=str(uuid.uuid4()),
+                    owner_id=owner_id,
+                    name=(name or "").strip(),
+                    email=clean_email,
+                    phone=(phone or "").strip(),
+                    linkedin=(linkedin or "").strip(),
+                    github=(github or "").strip(),
+                    resume_filename=resume_filename,
+                    resume_text=resume_text,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
+            session.commit()
+            session.refresh(row)
+            return _candidate(row)
+        finally:
+            session.close()
+
+    def add_application(self, job_id: str, candidate_id: str, analysis: Dict[str, Any]) -> Dict[str, Any]:
+        session = self._session()
+        try:
+            row = session.scalar(
+                select(Application).where(Application.job_id == job_id, Application.candidate_id == candidate_id)
+            )
+            now = utc_now()
+            if row:
+                row.analysis_json = analysis
+                row.updated_at = now
+            else:
+                row = Application(
+                    id=str(uuid.uuid4()),
+                    job_id=job_id,
+                    candidate_id=candidate_id,
+                    status="new",
+                    analysis_json=analysis,
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
+            session.commit()
+            session.refresh(row)
+            candidate = session.get(Candidate, candidate_id)
+            return _application(row, candidate or Candidate(id=candidate_id, name=""))
+        finally:
+            session.close()
+
+    def list_applications(self, owner_id: str, job_id: str) -> List[Dict[str, Any]]:
+        session = self._session()
+        try:
+            stmt = (
+                select(Application, Candidate)
+                .join(Candidate, Candidate.id == Application.candidate_id)
+                .join(Job, Job.id == Application.job_id)
+                .where(Job.owner_id == owner_id, Application.job_id == job_id)
+                .order_by(Application.created_at.desc())
+            )
+            rows = session.execute(stmt).all()
+            return [_application(app, candidate) for app, candidate in rows]
+        finally:
+            session.close()
+
+    def get_application(self, owner_id: str, job_id: str, candidate_id: str) -> Optional[Dict[str, Any]]:
+        session = self._session()
+        try:
+            stmt = (
+                select(Application, Candidate)
+                .join(Candidate, Candidate.id == Application.candidate_id)
+                .join(Job, Job.id == Application.job_id)
+                .where(
+                    Job.owner_id == owner_id,
+                    Application.job_id == job_id,
+                    Application.candidate_id == candidate_id,
+                )
+            )
+            result = session.execute(stmt).first()
+            if not result:
+                return None
+            app, candidate = result
+            return _application(app, candidate, include_resume_text=True)
+        finally:
+            session.close()
+
+    def update_application_status(self, owner_id: str, job_id: str, candidate_id: str, status: str) -> Optional[Dict[str, Any]]:
+        session = self._session()
+        try:
+            stmt = (
+                select(Application)
+                .join(Job, Job.id == Application.job_id)
+                .where(
+                    Job.owner_id == owner_id,
+                    Application.job_id == job_id,
+                    Application.candidate_id == candidate_id,
+                )
+            )
+            row = session.scalar(stmt)
+            if not row:
+                return None
+            row.status = status
+            row.updated_at = utc_now()
+            session.commit()
+        finally:
+            session.close()
+        return self.get_application(owner_id, job_id, candidate_id)
+
+    def create_audit_log(
+        self,
+        owner_id: str,
+        *,
+        action: str,
+        entity_type: str,
+        entity_id: str = "",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        row = AuditLog(
+            id=str(uuid.uuid4()),
+            owner_id=owner_id,
+            action=action.strip(),
+            entity_type=entity_type.strip(),
+            entity_id=(entity_id or "").strip(),
+            metadata_json=metadata or {},
+            created_at=utc_now(),
+        )
+        session = self._session()
+        try:
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return {
+                "id": row.id,
+                "owner_id": row.owner_id,
+                "action": row.action,
+                "entity_type": row.entity_type,
+                "entity_id": row.entity_id,
+                "metadata": row.metadata_json if isinstance(row.metadata_json, dict) else {},
+                "created_at": row.created_at,
+            }
+        finally:
+            session.close()
+
+    def list_audit_logs(self, owner_id: str, limit: int = 100) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        session = self._session()
+        try:
+            rows = session.scalars(
+                select(AuditLog)
+                .where(AuditLog.owner_id == owner_id)
+                .order_by(AuditLog.created_at.desc())
+                .limit(limit)
+            ).all()
+            return [
+                {
+                    "id": row.id,
+                    "owner_id": row.owner_id,
+                    "action": row.action,
+                    "entity_type": row.entity_type,
+                    "entity_id": row.entity_id,
+                    "metadata": row.metadata_json if isinstance(row.metadata_json, dict) else {},
+                    "created_at": row.created_at,
+                }
+                for row in rows
+            ]
+        finally:
+            session.close()
+
+    def create_evaluation_run(
+        self,
+        owner_id: str,
+        job_id: str,
+        metrics: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        row = EvaluationRun(
+            id=str(uuid.uuid4()),
+            owner_id=owner_id,
+            job_id=job_id,
+            metrics_json=metrics,
+            created_at=utc_now(),
+        )
+        session = self._session()
+        try:
+            session.add(row)
+            session.commit()
+            session.refresh(row)
+            return {
+                "id": row.id,
+                "owner_id": row.owner_id,
+                "job_id": row.job_id,
+                "created_at": row.created_at,
+                "metrics": row.metrics_json if isinstance(row.metrics_json, dict) else {},
+            }
+        finally:
+            session.close()
+
+    def list_evaluation_runs(self, owner_id: str, job_id: str, limit: int = 20) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 100))
+        session = self._session()
+        try:
+            rows = session.scalars(
+                select(EvaluationRun)
+                .where(EvaluationRun.owner_id == owner_id, EvaluationRun.job_id == job_id)
+                .order_by(EvaluationRun.created_at.desc())
+                .limit(limit)
+            ).all()
+            return [
+                {
+                    "id": row.id,
+                    "owner_id": row.owner_id,
+                    "job_id": row.job_id,
+                    "created_at": row.created_at,
+                    "metrics": row.metrics_json if isinstance(row.metrics_json, dict) else {},
+                }
+                for row in rows
+            ]
+        finally:
+            session.close()
+
+
+# Keep the V11 import contract: api.py does `from platform_store import store`.
+store = PlatformStore()

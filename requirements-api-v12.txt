@@ -1,0 +1,5 @@
+# V12 builds on V11's FastAPI/auth stack.
+-r requirements-api-v11.txt
+SQLAlchemy>=2.0,<3
+alembic>=1.14,<2
+psycopg[binary]>=3.2,<4

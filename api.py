@@ -1,0 +1,400 @@
+"""FastAPI backend for the AI Resume Screening Platform (V14).
+
+V14 adds audit history, evaluation telemetry, and responsible-AI safeguards on top of
+the V13 authenticated recruiter platform.
+"""
+from __future__ import annotations
+
+import os
+from typing import List, Optional
+
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+from api_schemas import AnalysisResponse, AnalyzeTextRequest
+from backend_service import analyze_candidates, extract_text_from_bytes
+from platform_store import store
+from security import create_access_token, decode_access_token, hash_password, verify_password
+from responsible_ai import RESPONSIBLE_AI_NOTICE, evaluate_threshold
+from v14_schemas import AuditLogResponse, EvaluationRunRequest, EvaluationRunResponse
+
+from v11_schemas import (
+    ApplicationStatusRequest,
+    AuthResponse,
+    AuthenticatedUserResponse,
+    CandidateApplicationResponse,
+    JobCreateRequest,
+    JobResponse,
+    JobUpdateRequest,
+    LoginRequest,
+    RegisterRequest,
+    UserPublic,
+)
+
+API_VERSION = "v14"
+security = HTTPBearer(auto_error=False)
+
+
+def _cors_origins() -> List[str]:
+    raw = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://localhost:5173")
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+app = FastAPI(
+    title="AI Resume Screening Platform API",
+    description=(
+        "V14 FastAPI backend for the React recruiter workspace, with recruiter authentication, "
+        "job management, job-scoped candidate analysis, V9 explainability, V12 persistence, audit logs, and evaluation telemetry."
+    ),
+    version=API_VERSION,
+)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins(),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def _user_public(row: dict) -> UserPublic:
+    return UserPublic(
+        id=row["id"],
+        email=row["email"],
+        full_name=row["full_name"],
+        created_at=row["created_at"],
+        active=bool(row["active"]),
+    )
+
+
+def get_current_user(credentials: HTTPAuthorizationCredentials | None = Depends(security)) -> dict:
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+    if credentials.scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Use a Bearer access token.")
+    try:
+        payload = decode_access_token(credentials.credentials)
+        user_id = str(payload.get("sub", ""))
+    except Exception as exc:
+        raise HTTPException(status_code=401, detail="Invalid or expired access token.") from exc
+    user = store.get_user_by_email(str(payload.get("email", "")))
+    if not user or user["id"] != user_id or not bool(user["active"]):
+        raise HTTPException(status_code=401, detail="User account is unavailable.")
+    return user
+
+
+def get_owned_job(user: dict, job_id: str) -> dict:
+    job = store.get_job(user["id"], job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    return job
+
+
+@app.get("/", tags=["System"])
+def root():
+    return {"service": "AI Resume Screening Platform API", "version": API_VERSION, "docs": "/docs", "health": "/health"}
+
+
+@app.get("/health", tags=["System"])
+def health():
+    return {"status": "ok", "service": "cv-analyzer-api", "version": API_VERSION}
+
+
+@app.post("/api/v1/auth/register", response_model=AuthResponse, tags=["Authentication"])
+def register(request: RegisterRequest) -> AuthResponse:
+    if store.get_user_by_email(request.email):
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+    try:
+        password_hash = hash_password(request.password)
+        user = store.create_user(request.email, request.full_name, password_hash)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    token = create_access_token(user["id"], user["email"])
+    try:
+        store.create_audit_log(user["id"], action="register", entity_type="user", entity_id=user["id"], metadata={})
+    except Exception:
+        pass
+    return AuthResponse(access_token=token, user=_user_public(user))
+
+
+@app.post("/api/v1/auth/login", response_model=AuthResponse, tags=["Authentication"])
+def login(request: LoginRequest) -> AuthResponse:
+    user = store.get_user_by_email(request.email)
+    if not user or not verify_password(request.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
+    if not bool(user["active"]):
+        raise HTTPException(status_code=403, detail="User account is inactive.")
+    token = create_access_token(user["id"], user["email"])
+    try:
+        store.create_audit_log(user["id"], action="login", entity_type="user", entity_id=user["id"], metadata={})
+    except Exception:
+        pass
+    return AuthResponse(access_token=token, user=_user_public(user))
+
+
+@app.get("/api/v1/auth/me", response_model=AuthenticatedUserResponse, tags=["Authentication"])
+def me(user: dict = Depends(get_current_user)) -> AuthenticatedUserResponse:
+    return AuthenticatedUserResponse(user=_user_public(user))
+
+
+@app.post("/api/v1/jobs", response_model=JobResponse, tags=["Jobs"])
+def create_job(request: JobCreateRequest, user: dict = Depends(get_current_user)) -> JobResponse:
+    job = store.create_job(user["id"], request.title, request.company, request.description)
+    try:
+        store.create_audit_log(user["id"], action="job_created", entity_type="job", entity_id=job["id"], metadata={"title": job["title"], "company": job["company"]})
+    except Exception:
+        pass
+    return JobResponse(**job)
+
+
+@app.get("/api/v1/jobs", response_model=List[JobResponse], tags=["Jobs"])
+def list_jobs(user: dict = Depends(get_current_user)) -> List[JobResponse]:
+    return [JobResponse(**job) for job in store.list_jobs(user["id"])]
+
+
+@app.get("/api/v1/jobs/{job_id}", response_model=JobResponse, tags=["Jobs"])
+def get_job(job_id: str, user: dict = Depends(get_current_user)) -> JobResponse:
+    return JobResponse(**get_owned_job(user, job_id))
+
+
+@app.patch("/api/v1/jobs/{job_id}", response_model=JobResponse, tags=["Jobs"])
+def update_job(job_id: str, request: JobUpdateRequest, user: dict = Depends(get_current_user)) -> JobResponse:
+    get_owned_job(user, job_id)
+    job = store.update_job(user["id"], job_id, **request.model_dump(exclude_none=True))
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    try:
+        store.create_audit_log(user["id"], action="job_updated", entity_type="job", entity_id=job_id, metadata={"fields": sorted(request.model_dump(exclude_none=True).keys())})
+    except Exception:
+        pass
+    return JobResponse(**job)
+
+
+@app.delete("/api/v1/jobs/{job_id}", tags=["Jobs"])
+def delete_job(job_id: str, user: dict = Depends(get_current_user)):
+    get_owned_job(user, job_id)
+    store.delete_job(user["id"], job_id)
+    try:
+        store.create_audit_log(user["id"], action="job_deleted", entity_type="job", entity_id=job_id, metadata={})
+    except Exception:
+        pass
+    return {"deleted": True, "job_id": job_id}
+
+
+@app.post("/api/v1/jobs/{job_id}/analyze", response_model=List[CandidateApplicationResponse], tags=["Job Analysis"])
+async def analyze_job(
+    job_id: str,
+    resumes: List[UploadFile] = File(..., description="One or more resume files"),
+    top_n_keywords: int = 20,
+    include_raw_text: bool = False,
+    user: dict = Depends(get_current_user),
+) -> List[CandidateApplicationResponse]:
+    job = get_owned_job(user, job_id)
+    if job["status"] != "open":
+        raise HTTPException(status_code=409, detail="Cannot analyze candidates for a closed job.")
+    if not 5 <= top_n_keywords <= 100:
+        raise HTTPException(status_code=400, detail="top_n_keywords must be 5-100.")
+    if not 1 <= len(resumes) <= 50:
+        raise HTTPException(status_code=400, detail="Provide 1-50 resume files.")
+
+    resume_payload = []
+    for resume in resumes:
+        filename = resume.filename or "resume.txt"
+        raw = await resume.read()
+        try:
+            text = extract_text_from_bytes(filename, raw)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if text:
+            resume_payload.append((filename, text))
+    if not resume_payload:
+        raise HTTPException(status_code=400, detail="No readable resumes were found.")
+
+    try:
+        analysis = analyze_candidates(
+            job["description"],
+            resume_payload,
+            top_n_keywords=top_n_keywords,
+            include_raw_text=include_raw_text,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}") from exc
+
+    by_name = {item.get("resume_name"): item for item in analysis.get("candidates", [])}
+    output: List[CandidateApplicationResponse] = []
+    for filename, resume_text in resume_payload:
+        result = by_name.get(filename)
+        if not result or result.get("error"):
+            continue
+        contact = result.get("contact", {}) or {}
+        candidate = store.upsert_candidate(
+            user["id"],
+            name=result.get("candidate_name", ""),
+            email=contact.get("email", ""),
+            phone=contact.get("phone", ""),
+            linkedin=contact.get("linkedin", ""),
+            github=contact.get("github", ""),
+            resume_filename=filename,
+            resume_text=resume_text,
+        )
+        stored = dict(result)
+        # Avoid storing raw resume text in the structured analysis JSON unless
+        # the caller explicitly requested it.
+        if not include_raw_text:
+            stored.pop("resume_text", None)
+        app_row = store.add_application(job_id, candidate["id"], stored)
+        output.append(
+            CandidateApplicationResponse(
+                application_id=app_row["id"],
+                job_id=job_id,
+                candidate_id=candidate["id"],
+                status=app_row["status"],
+                name=candidate["name"],
+                email=candidate["email"],
+                phone=candidate["phone"],
+                linkedin=candidate["linkedin"],
+                github=candidate["github"],
+                resume_filename=candidate["resume_filename"],
+                analysis=stored,
+                created_at=app_row["created_at"],
+                updated_at=app_row["updated_at"],
+            )
+        )
+    try:
+        store.create_audit_log(user["id"], action="screening_analysis_completed", entity_type="job", entity_id=job_id, metadata={"candidate_count": len(output)})
+    except Exception:
+        pass
+    return output
+
+
+@app.get("/api/v1/jobs/{job_id}/candidates", response_model=List[CandidateApplicationResponse], tags=["Candidates"])
+def list_job_candidates(job_id: str, user: dict = Depends(get_current_user)) -> List[CandidateApplicationResponse]:
+    get_owned_job(user, job_id)
+    rows = store.list_applications(user["id"], job_id)
+    return [CandidateApplicationResponse(**row) for row in rows]
+
+
+@app.get("/api/v1/jobs/{job_id}/candidates/{candidate_id}", response_model=CandidateApplicationResponse, tags=["Candidates"])
+def get_job_candidate(job_id: str, candidate_id: str, user: dict = Depends(get_current_user)) -> CandidateApplicationResponse:
+    get_owned_job(user, job_id)
+    row = store.get_application(user["id"], job_id, candidate_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Candidate application not found.")
+    row.pop("resume_text", None)
+    return CandidateApplicationResponse(**row)
+
+
+@app.patch("/api/v1/jobs/{job_id}/candidates/{candidate_id}/status", response_model=CandidateApplicationResponse, tags=["Candidates"])
+def update_candidate_status(
+    job_id: str,
+    candidate_id: str,
+    request: ApplicationStatusRequest,
+    user: dict = Depends(get_current_user),
+) -> CandidateApplicationResponse:
+    get_owned_job(user, job_id)
+    current = store.get_application(user["id"], job_id, candidate_id)
+    if not current:
+        raise HTTPException(status_code=404, detail="Candidate application not found.")
+    previous_status = current.get("status")
+    row = store.update_application_status(user["id"], job_id, candidate_id, request.status)
+    if not row:
+        raise HTTPException(status_code=404, detail="Candidate application not found.")
+    try:
+        store.create_audit_log(user["id"], action="candidate_status_changed", entity_type="application", entity_id=row["application_id"], metadata={"candidate_id": candidate_id, "from": previous_status, "to": row["status"]})
+    except Exception:
+        pass
+    row.pop("resume_text", None)
+    return CandidateApplicationResponse(**row)
+
+
+@app.get("/api/v1/audit-logs", response_model=List[AuditLogResponse], tags=["Audit"])
+def list_audit_logs(limit: int = 100, user: dict = Depends(get_current_user)) -> List[AuditLogResponse]:
+    if not 1 <= limit <= 500:
+        raise HTTPException(status_code=400, detail="limit must be 1-500.")
+    return [AuditLogResponse(**row) for row in store.list_audit_logs(user["id"], limit=limit)]
+
+
+@app.get("/api/v1/jobs/{job_id}/evaluation-runs", response_model=List[EvaluationRunResponse], tags=["Evaluation"])
+def list_evaluation_runs(job_id: str, limit: int = 20, user: dict = Depends(get_current_user)) -> List[EvaluationRunResponse]:
+    get_owned_job(user, job_id)
+    if not 1 <= limit <= 100:
+        raise HTTPException(status_code=400, detail="limit must be 1-100.")
+    return [EvaluationRunResponse(**row) for row in store.list_evaluation_runs(user["id"], job_id, limit=limit)]
+
+
+@app.post("/api/v1/jobs/{job_id}/evaluate", response_model=EvaluationRunResponse, tags=["Evaluation"])
+def evaluate_job(job_id: str, request: EvaluationRunRequest, user: dict = Depends(get_current_user)) -> EvaluationRunResponse:
+    get_owned_job(user, job_id)
+    rows = store.list_applications(user["id"], job_id)
+    row_map = {str(row["candidate_id"]): row for row in rows}
+    labels = {}
+    for item in request.labels:
+        if item.candidate_id not in row_map:
+            raise HTTPException(status_code=400, detail=f"Candidate {item.candidate_id} is not part of this job.")
+        labels[item.candidate_id] = item.label
+    metrics = evaluate_threshold(rows, labels, request.threshold)
+    if metrics["sample_size"] == 0:
+        raise HTTPException(status_code=400, detail="No labeled candidates with a usable ATS score were provided.")
+    run = store.create_evaluation_run(user["id"], job_id, metrics)
+    try:
+        store.create_audit_log(user["id"], action="evaluation_run_created", entity_type="job", entity_id=job_id, metadata={"sample_size": metrics["sample_size"], "threshold": metrics["threshold"]})
+    except Exception:
+        pass
+    return EvaluationRunResponse(**run)
+
+
+@app.get("/api/v1/responsible-ai/notice", tags=["Responsible AI"])
+def responsible_ai_notice():
+    return {"notice": RESPONSIBLE_AI_NOTICE}
+
+
+# V10 backwards-compatible analysis routes.
+@app.post("/api/v1/analyze/text", response_model=AnalysisResponse, tags=["Analysis"])
+def analyze_text(request: AnalyzeTextRequest) -> dict:
+    try:
+        return analyze_candidates(
+            request.job_description,
+            [(resume.filename, resume.text) for resume in request.resumes],
+            top_n_keywords=request.top_n_keywords,
+            include_raw_text=request.include_raw_text,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}") from exc
+
+
+@app.post("/api/v1/analyze/files", response_model=AnalysisResponse, tags=["Analysis"])
+async def analyze_files(
+    job_description: UploadFile = File(..., description="JD PDF/DOCX/TXT"),
+    resumes: List[UploadFile] = File(..., description="One or more resume files"),
+    top_n_keywords: int = 20,
+    include_raw_text: bool = False,
+) -> dict:
+    if not 5 <= top_n_keywords <= 100:
+        raise HTTPException(status_code=400, detail="top_n_keywords must be 5-100.")
+    if not resumes:
+        raise HTTPException(status_code=400, detail="At least one resume is required.")
+    if len(resumes) > 50:
+        raise HTTPException(status_code=400, detail="Maximum 50 resumes per request.")
+    try:
+        jd_bytes = await job_description.read()
+        jd_text = extract_text_from_bytes(job_description.filename or "job_description.txt", jd_bytes)
+        if not jd_text:
+            raise ValueError("Job description contains no readable text.")
+        resume_payload = []
+        for resume in resumes:
+            raw = await resume.read()
+            text = extract_text_from_bytes(resume.filename or "resume.txt", raw)
+            if text:
+                resume_payload.append((resume.filename or "resume.txt", text))
+        if not resume_payload:
+            raise ValueError("No readable resumes were found.")
+        return analyze_candidates(jd_text, resume_payload, top_n_keywords=top_n_keywords, include_raw_text=include_raw_text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"File analysis failed: {exc}") from exc
