@@ -1,4 +1,4 @@
-name: CI
+﻿name: CI
 
 on:
   push:
@@ -98,11 +98,16 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Create CI environment file
+        shell: bash
+        run: |
+          printf '%s\n' 'JWT_SECRET=ci-only-validation-secret' > .env.ci
+
       - name: Validate Compose file
-        run: docker compose config --quiet
+        run: docker compose --env-file .env.ci config --quiet
 
       - name: Build API image
-        run: docker compose build api
+        run: docker compose --env-file .env.ci build api
 
       - name: Build frontend image
-        run: docker compose build frontend
+        run: docker compose --env-file .env.ci build frontend
