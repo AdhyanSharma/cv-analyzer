@@ -89,6 +89,10 @@ class CandidateApplicationResponse(BaseModel):
     application_id: str
     job_id: str
     candidate_id: str
+    resume_version_id: str | None = None
+    resume_version_number: int | None = None
+    resume_version_filename: str | None = None
+    resume_version_reused: bool = False
     status: str
     name: str
     email: str

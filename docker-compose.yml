@@ -1,4 +1,4 @@
-services:
+﻿services:
   db:
     image: postgres:17-alpine
     restart: unless-stopped
@@ -34,7 +34,7 @@ services:
     ports:
       - "8000:8000"
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=5).read()"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read()"]
       interval: 10s
       timeout: 8s
       start_period: 45s
@@ -51,7 +51,7 @@ services:
       api:
         condition: service_healthy
     ports:
-      - "8080:80"
+      - "8081:80"
     networks:
       - cvnet
 
@@ -61,3 +61,4 @@ volumes:
 networks:
   cvnet:
     driver: bridge
+

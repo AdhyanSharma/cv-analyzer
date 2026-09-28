@@ -35,6 +35,21 @@ export const api = {
   deleteJob: (id) => request(`/api/v1/jobs/${id}`, { method: 'DELETE' }),
   candidates: (jobId) => request(`/api/v1/jobs/${jobId}/candidates`),
   candidate: (jobId, candidateId) => request(`/api/v1/jobs/${jobId}/candidates/${candidateId}`),
+  resumeVersions: (candidateId) => request(`/api/v1/candidates/${candidateId}/resume-versions`),
+  compareResumeVersions: (candidateId, version1, version2, jobId = null) => {
+    const params = new URLSearchParams({
+      version1: String(version1),
+      version2: String(version2)
+    })
+
+    if (jobId) {
+      params.set('job_id', jobId)
+    }
+
+    return request(
+      `/api/v1/candidates/${candidateId}/resume-compare?${params.toString()}`
+    )
+  },
   updateCandidateStatus: (jobId, candidateId, status) => request(`/api/v1/jobs/${jobId}/candidates/${candidateId}/status`, {
     method: 'PATCH', body: JSON.stringify({ status })
   }),

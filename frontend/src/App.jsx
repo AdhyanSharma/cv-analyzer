@@ -152,7 +152,56 @@ function Dashboard({ user, onLogout }) {
     try {
       const result = await api.analyzeJob(selectedJob.id, files)
       setCandidateRows((prev) => mergeCandidates(prev, result))
-      setMessage(`${result.length} candidate application(s) analyzed.`)
+
+      const newVersions = result.filter(
+        (item) =>
+          Number(item.resume_version_number) > 1 &&
+          !item.resume_version_reused
+      )
+
+      const reusedVersions = result.filter(
+        (item) => item.resume_version_reused
+      )
+
+      const exactDuplicates = result.filter(
+        (item) =>
+          item.analysis?.duplicate_detection?.is_duplicate === true
+      )
+
+      const messages = []
+
+      if (newVersions.length) {
+        const details = newVersions
+          .map(
+            (item) =>
+              `${item.name || 'Candidate'} → Resume v${item.resume_version_number}`
+          )
+          .join(', ')
+
+        messages.push(
+          `New resume version created: ${details}.`
+        )
+      }
+
+      if (reusedVersions.length) {
+        messages.push(
+          `${reusedVersions.length} existing resume version(s) reused.`
+        )
+      }
+
+      if (exactDuplicates.length) {
+        messages.push(
+          `${exactDuplicates.length} duplicate application(s) retained.`
+        )
+      }
+
+      if (!messages.length) {
+        messages.push(
+          `${result.length} candidate application(s) analyzed.`
+        )
+      }
+
+      setMessage(messages.join(' '))
     } catch (err) { setError(err.message) } finally { setBusy(false) }
   }
 
@@ -216,34 +265,609 @@ function JobWorkspace({ job, candidates, busy, onUpload, onStatus, onSelect, onD
 
 function CandidateTable({ rows, onStatus, onSelect }) {
   if (!rows.length) return <div className="empty-table"><div className="empty-icon small">📄</div><h3>No candidates yet</h3><p className="muted">Upload resumes to run the screening pipeline.</p></div>
-  return <div className="table-wrap"><table><thead><tr><th>Candidate</th><th>ATS score</th><th>Requirement match</th><th>Status</th><th></th></tr></thead><tbody>{rows.map(row => {const a=row.analysis||{}; const ats=atsOf(a); const req=arrOf(a,'required_matched').length; const reqTotal=(a.requirement_counts?.required_total ?? a.requirements?.required_total ?? null); return <tr key={row.candidate_id}><td><button className="candidate-name" onClick={()=>onSelect(row)}>{row.name || 'Unnamed candidate'}</button><div className="candidate-meta">{row.email || row.resume_filename}</div></td><td><span className={`score ${scoreClass(ats)}`}>{ats == null ? '—' : `${ats.toFixed(1)}%`}</span></td><td>{reqTotal == null ? <span className="muted">See details</span> : <span>{req}/{reqTotal}</span>}</td><td><select value={row.status} onChange={(e)=>onStatus(row.candidate_id,e.target.value)}>{STATUS_OPTIONS.map(s=><option key={s} value={s}>{s}</option>)}</select></td><td><button className="icon-btn" onClick={()=>onSelect(row)}>View →</button></td></tr>})}</tbody></table></div>
+  return <div className="table-wrap"><table><thead><tr><th>Candidate</th><th>ATS score</th><th>Requirement match</th><th>Status</th><th></th></tr></thead><tbody>{rows.map(row => {const a=row.analysis||{}; const ats=atsOf(a); const req=arrOf(a,'required_matched').length; const reqTotal=(a.requirement_counts?.required_total ?? a.requirements?.required_total ?? null); return <tr key={row.candidate_id}><td><button className="candidate-name" onClick={()=>onSelect(row)}>{row.name || 'Unnamed candidate'}</button><div className="candidate-meta">{row.email || row.resume_filename}</div>{row.resume_version_number != null && (<div className="candidate-version-meta">Screened with Resume v{row.resume_version_number}</div>)}</td><td><span className={`score ${scoreClass(ats)}`}>{ats == null ? '—' : `${ats.toFixed(1)}%`}</span></td><td>{reqTotal == null ? <span className="muted">See details</span> : <span>{req}/{reqTotal}</span>}</td><td><select value={row.status} onChange={(e)=>onStatus(row.candidate_id,e.target.value)}>{STATUS_OPTIONS.map(s=><option key={s} value={s}>{s}</option>)}</select></td><td><div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}><button className="icon-btn" onClick={()=>onSelect(row)}>View →</button><button className="secondary" onClick={()=>onSelect(row)} style={{ padding: '8px 10px', fontSize: '12px' }}>Compare</button></div></td></tr>})}</tbody></table></div>
 }
 
 function CandidateDrawer({ row, onClose }) {
-  const a=row.analysis||{}
-  const ats=atsOf(a)
-  const scores=[
-    ['Skill match', scoreOf(a,'skill_score')],
-    ['Semantic match', scoreOf(a,'semantic_score')],
-    ['Lexical match', scoreOf(a,'lexical_score')],
-    ['Keyword match', scoreOf(a,'keyword_score')]
+  const a = row.analysis || {}
+  const ats = atsOf(a)
+
+  const [resumeVersions, setResumeVersions] = useState([])
+  const [resumeLoading, setResumeLoading] = useState(true)
+  const [resumeError, setResumeError] = useState('')
+  const [compareFrom, setCompareFrom] = useState('')
+  const [compareTo, setCompareTo] = useState('')
+  const [comparison, setComparison] = useState(null)
+  const [compareLoading, setCompareLoading] = useState(false)
+  const [compareError, setCompareError] = useState('')
+
+  const screenedVersion = resumeVersions.find(
+    (version) => version.id === row.resume_version_id
+  )
+
+  const scores = [
+    ['Skill match', scoreOf(a, 'skill_score')],
+    ['Semantic match', scoreOf(a, 'semantic_score')],
+    ['Lexical match', scoreOf(a, 'lexical_score')],
+    ['Keyword match', scoreOf(a, 'keyword_score')]
   ]
-  const matched=arrOf(a,'matched_skills')
-  const missing=arrOf(a,'missing_skills')
-  const reqMatched=arrOf(a,'required_matched')
-  const reqMissing=arrOf(a,'required_missing')
-  const evidence=arrOf(a,'evidence', arrOf(a,'supporting_evidence', arrOf(a,'resume_evidence')))
-  return <div className="drawer-backdrop" onMouseDown={(e)=>e.target===e.currentTarget&&onClose()}><aside className="drawer">
-    <div className="drawer-head"><div><div className="eyebrow">CANDIDATE 360°</div><h2>{row.name || 'Unnamed candidate'}</h2><p>{row.email || row.resume_filename}</p></div><button className="close" onClick={onClose}>×</button></div>
-    <div className="drawer-body">
-      <div className="hero-score"><div><div className="stat-label">EXISTING ATS SCORE</div><div className={`hero-number ${scoreClass(ats)}`}>{ats == null ? '—' : `${ats.toFixed(1)}%`}</div></div><div className={`badge ${row.status}`}>{row.status}</div></div>
-      <Section title="Score breakdown"><div className="score-grid">{scores.map(([label,value])=><div className="mini-score" key={label}><span>{label}</span><b>{value==null?'—':`${Number(value).toFixed(1)}%`}</b><div className="meter"><i style={{width:`${Math.max(0,Math.min(100,Number(value)||0))}%`}} /></div></div>)}</div></Section>
-      <Section title="Skills"><div className="tag-group">{matched.length?matched.map(x=><span className="tag success" key={x}>✓ {x}</span>):<span className="muted">No matched skills returned.</span>}</div>{missing.length>0&&<><div className="sub-label">Not detected</div><div className="tag-group">{missing.map(x=><span className="tag danger-tag" key={x}>× {x}</span>)}</div></>}</Section>
-      <Section title="Requirement coverage"><div className="coverage-list"><Coverage label="Required matched" values={reqMatched}/><Coverage label="Required missing" values={reqMissing}/></div></Section>
-      <Section title="Evidence"><div className="evidence-list">{evidence.length?evidence.slice(0,8).map((item,i)=><div className="evidence" key={i}>“{textOf(item)}”</div>):<div className="muted">No evidence snippets were returned by the API for this candidate.</div>}</div></Section>
-      <Section title="Contact & resume"><Info label="Phone" value={row.phone}/><Info label="LinkedIn" value={row.linkedin}/><Info label="GitHub" value={row.github}/><Info label="File" value={row.resume_filename}/></Section>
+
+  const matched = arrOf(a, 'matched_skills')
+  const missing = arrOf(a, 'missing_skills')
+  const reqMatched = arrOf(a, 'required_matched')
+  const reqMissing = arrOf(a, 'required_missing')
+  const evidence = arrOf(
+    a,
+    'evidence',
+    arrOf(a, 'supporting_evidence', arrOf(a, 'resume_evidence'))
+  )
+
+  useEffect(() => {
+    let active = true
+
+    async function loadResumeVersions() {
+      if (!row?.candidate_id) {
+        setResumeVersions([])
+        setResumeLoading(false)
+        return
+      }
+
+      setResumeLoading(true)
+      setResumeError('')
+
+      try {
+        const result = await api.resumeVersions(row.candidate_id)
+
+        if (active) {
+          const versions = Array.isArray(result?.versions)
+            ? result.versions
+            : []
+
+          setResumeVersions(versions)
+
+          if (versions.length >= 2) {
+            const sorted = [...versions].sort(
+              (a, b) =>
+                Number(a.version_number) - Number(b.version_number)
+            )
+
+            setCompareFrom(String(sorted[sorted.length - 2].version_number))
+            setCompareTo(String(sorted[sorted.length - 1].version_number))
+          }
+        }
+      } catch (err) {
+        if (active) {
+          setResumeError(err.message || 'Unable to load resume history.')
+          setResumeVersions([])
+        }
+      } finally {
+        if (active) {
+          setResumeLoading(false)
+        }
+      }
+    }
+
+    loadResumeVersions()
+
+    return () => {
+      active = false
+    }
+  }, [row?.candidate_id])
+
+  async function runComparison() {
+    if (!row?.candidate_id || !compareFrom || !compareTo) {
+      return
+    }
+
+    if (compareFrom === compareTo) {
+      setCompareError('Choose two different resume versions.')
+      return
+    }
+
+    setCompareLoading(true)
+    setCompareError('')
+    setComparison(null)
+
+    try {
+      const result = await api.compareResumeVersions(
+        row.candidate_id,
+        Number(compareFrom),
+        Number(compareTo),
+        row.job_id
+      )
+
+      setComparison(result)
+    } catch (err) {
+      setCompareError(
+        err.message || 'Unable to compare resume versions.'
+      )
+    } finally {
+      setCompareLoading(false)
+    }
+  }
+
+  return (
+    <div
+      className="drawer-backdrop"
+      onMouseDown={(e) =>
+        e.target === e.currentTarget && onClose()
+      }
+    >
+      <aside className="drawer">
+
+        <div className="drawer-head">
+          <div>
+            <div className="eyebrow">CANDIDATE 360°</div>
+            <h2>{row.name || 'Unnamed candidate'}</h2>
+            <p>{row.email || row.resume_filename}</p>
+          </div>
+
+          <button className="close" onClick={onClose}>
+            ×
+          </button>
+        </div>
+
+        <div className="drawer-body">
+
+          <div className="hero-score">
+            <div>
+              <div className="stat-label">
+                EXISTING ATS SCORE
+              </div>
+
+              <div className={`hero-number ${scoreClass(ats)}`}>
+                {ats == null ? '—' : `${ats.toFixed(1)}%`}
+              </div>
+            </div>
+
+            <div className={`badge ${row.status}`}>
+              {row.status}
+            </div>
+          </div>
+
+          <Section title="Score breakdown">
+            <div className="score-grid">
+              {scores.map(([label, value]) => (
+                <div className="mini-score" key={label}>
+                  <span>{label}</span>
+
+                  <b>
+                    {value == null
+                      ? '—'
+                      : `${Number(value).toFixed(1)}%`}
+                  </b>
+
+                  <div className="meter">
+                    <i
+                      style={{
+                        width: `${Math.max(
+                          0,
+                          Math.min(100, Number(value) || 0)
+                        )}%`
+                      }}
+                    />
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Section>
+
+          <Section title="Skills">
+            <div className="tag-group">
+              {matched.length ? (
+                matched.map((x) => (
+                  <span className="tag success" key={x}>
+                    ✓ {x}
+                  </span>
+                ))
+              ) : (
+                <span className="muted">
+                  No matched skills returned.
+                </span>
+              )}
+            </div>
+
+            {missing.length > 0 && (
+              <>
+                <div className="sub-label">
+                  Not detected
+                </div>
+
+                <div className="tag-group">
+                  {missing.map((x) => (
+                    <span
+                      className="tag danger-tag"
+                      key={x}
+                    >
+                      × {x}
+                    </span>
+                  ))}
+                </div>
+              </>
+            )}
+          </Section>
+
+          <Section title="Requirement coverage">
+            <div className="coverage-list">
+              <Coverage
+                label="Required matched"
+                values={reqMatched}
+              />
+
+              <Coverage
+                label="Required missing"
+                values={reqMissing}
+              />
+            </div>
+          </Section>
+
+          <Section title="Evidence">
+            <div className="evidence-list">
+              {evidence.length ? (
+                evidence.slice(0, 8).map((item, i) => (
+                  <div className="evidence" key={i}>
+                    “{textOf(item)}”
+                  </div>
+                ))
+              ) : (
+                <div className="muted">
+                  No evidence snippets were returned by the API
+                  for this candidate.
+                </div>
+              )}
+            </div>
+          </Section>
+
+          <Section title="Resume history">
+
+            {resumeLoading && (
+              <div className="muted small-text">
+                Loading resume versions…
+              </div>
+            )}
+
+            {!resumeLoading && resumeError && (
+              <div className="error-box">
+                {resumeError}
+              </div>
+            )}
+
+            {!resumeLoading && screenedVersion && (
+              <div className="screened-resume">
+                <div className="screened-resume-label">
+                  SCREENED WITH
+                </div>
+
+                <div className="screened-resume-main">
+                  <div className="screened-resume-version">
+                    v{screenedVersion.version_number}
+                  </div>
+
+                  <div>
+                    <div className="screened-resume-name">
+                      {screenedVersion.resume_filename}
+                    </div>
+
+                    <div className="screened-resume-sub">
+                      This is the exact resume version used for this application.
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {!resumeLoading &&
+              !resumeError &&
+              resumeVersions.length === 0 && (
+                <div className="muted">
+                  No resume version history available.
+                </div>
+              )}
+
+            {!resumeLoading &&
+              !resumeError &&
+              resumeVersions.length > 0 && (
+                <div className="resume-version-list">
+                  {[...resumeVersions]
+                    .sort(
+                      (a, b) =>
+                        Number(b.version_number) -
+                        Number(a.version_number)
+                    )
+                    .map((version) => (
+                      <div
+                        className={
+                          version.is_current
+                            ? 'resume-version current'
+                            : 'resume-version'
+                        }
+                        key={version.id}
+                      >
+                        <div className="resume-version-main">
+
+                          <div className="resume-version-number">
+                            v{version.version_number}
+                          </div>
+
+                          <div className="resume-version-info">
+                            <div className="resume-version-name">
+                              {version.resume_filename}
+                            </div>
+
+                            <div className="resume-version-date">
+                              {version.created_at
+                                ? new Date(
+                                    version.created_at
+                                  ).toLocaleString()
+                                : 'Date unavailable'}
+                            </div>
+                          </div>
+
+                          {version.is_current && (
+                            <span className="badge open">
+                              CURRENT
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                </div>
+              )}
+
+            {resumeVersions.length >= 2 && (
+              <div className="resume-comparison">
+
+                <div className="sub-label">
+                  COMPARE VERSIONS
+                </div>
+
+                <div className="compare-controls">
+
+                  <select
+                    value={compareFrom}
+                    onChange={(e) => setCompareFrom(e.target.value)}
+                  >
+                    {resumeVersions
+                      .slice()
+                      .sort(
+                        (a, b) =>
+                          Number(a.version_number) -
+                          Number(b.version_number)
+                      )
+                      .map((version) => (
+                        <option
+                          key={version.id}
+                          value={version.version_number}
+                        >
+                          v{version.version_number} · {version.resume_filename}
+                        </option>
+                      ))}
+                  </select>
+
+                  <span className="compare-arrow">→</span>
+
+                  <select
+                    value={compareTo}
+                    onChange={(e) => setCompareTo(e.target.value)}
+                  >
+                    {resumeVersions
+                      .slice()
+                      .sort(
+                        (a, b) =>
+                          Number(a.version_number) -
+                          Number(b.version_number)
+                      )
+                      .map((version) => (
+                        <option
+                          key={version.id}
+                          value={version.version_number}
+                        >
+                          v{version.version_number} · {version.resume_filename}
+                        </option>
+                      ))}
+                  </select>
+
+                  <button
+                    className="secondary"
+                    disabled={
+                      compareLoading ||
+                      !compareFrom ||
+                      !compareTo ||
+                      compareFrom === compareTo
+                    }
+                    onClick={runComparison}
+                  >
+                    {compareLoading ? 'Comparing…' : 'Compare'}
+                  </button>
+
+                </div>
+
+                {compareError && (
+                  <div className="error-box">
+                    {compareError}
+                  </div>
+                )}
+
+                {comparison && (
+                  <ResumeComparisonPanel comparison={comparison} />
+                )}
+
+              </div>
+            )}
+
+          </Section>
+
+          <Section title="Contact & resume">
+            <Info label="Phone" value={row.phone} />
+            <Info
+              label="LinkedIn"
+              value={row.linkedin}
+            />
+            <Info
+              label="GitHub"
+              value={row.github}
+            />
+            <Info
+              label="Current file"
+              value={row.resume_filename}
+            />
+          </Section>
+
+        </div>
+      </aside>
     </div>
-  </aside></div>
+  )
+}
+
+function ResumeComparisonPanel({ comparison }) {
+  const data = comparison?.comparison || {}
+  const ats = data.ats_score || {}
+  const skills = data.skills || {}
+  const missing = data.missing_skills || {}
+
+  const added = Array.isArray(skills.added)
+    ? skills.added
+    : []
+
+  const removed = Array.isArray(skills.removed)
+    ? skills.removed
+    : []
+
+  const resolved = Array.isArray(missing.resolved)
+    ? missing.resolved
+    : []
+
+  const newlyMissing = Array.isArray(missing.newly_missing)
+    ? missing.newly_missing
+    : []
+
+  const change = ats.change
+
+  return (
+    <div className="comparison-panel">
+
+      <div className="comparison-header">
+        <div>
+          <div className="section-title">
+            Version comparison
+          </div>
+
+          <div className="muted small-text">
+            v{comparison.version1.version_number}
+            {' '}→{' '}
+            v{comparison.version2.version_number}
+          </div>
+        </div>
+
+        <div className="comparison-files">
+          <span>
+            {comparison.version1.resume_filename}
+          </span>
+
+          <span>→</span>
+
+          <span>
+            {comparison.version2.resume_filename}
+          </span>
+        </div>
+      </div>
+
+      <div className="comparison-ats">
+
+        <div>
+          <span>v{comparison.version1.version_number}</span>
+          <b>
+            {ats.version1 == null
+              ? '—'
+              : `${Number(ats.version1).toFixed(1)}%`}
+          </b>
+        </div>
+
+        <div className="comparison-arrow">
+          →
+        </div>
+
+        <div>
+          <span>v{comparison.version2.version_number}</span>
+          <b>
+            {ats.version2 == null
+              ? '—'
+              : `${Number(ats.version2).toFixed(1)}%`}
+          </b>
+        </div>
+
+        {change != null && (
+          <div className="comparison-change">
+            {change >= 0 ? '+' : ''}
+            {Number(change).toFixed(1)}
+          </div>
+        )}
+
+      </div>
+
+      <div className="comparison-grid">
+
+        <ComparisonList
+          title="Skills added"
+          values={added}
+          empty="No skills added."
+          className="success-list"
+        />
+
+        <ComparisonList
+          title="Skills removed"
+          values={removed}
+          empty="No skills removed."
+          className="danger-list"
+        />
+
+        <ComparisonList
+          title="Missing skills resolved"
+          values={resolved}
+          empty="None resolved."
+          className="success-list"
+        />
+
+        <ComparisonList
+          title="Newly missing"
+          values={newlyMissing}
+          empty="None newly missing."
+          className="danger-list"
+        />
+
+      </div>
+
+    </div>
+  )
+}
+
+function ComparisonList({
+  title,
+  values,
+  empty,
+  className
+}) {
+  return (
+    <div className={`comparison-list ${className}`}>
+      <div className="sub-label">
+        {title}
+      </div>
+
+      {values.length ? (
+        <div className="tag-group">
+          {values.map((value) => (
+            <span className="tag" key={value}>
+              {value}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <span className="muted small-text">
+          {empty}
+        </span>
+      )}
+    </div>
+  )
 }
 
 function Section({title,children}){return <section className="drawer-section"><div className="section-title">{title}</div>{children}</section>}

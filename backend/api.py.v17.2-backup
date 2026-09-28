@@ -1,17 +1,17 @@
-﻿"""FastAPI backend for the AI Resume Screening Platform (V14).
+"""FastAPI backend for the AI Resume Screening Platform (V14).
 
 V14 adds audit history, evaluation telemetry, and responsible-AI safeguards on top of
 the V13 authenticated recruiter platform.
 """
 from __future__ import annotations
 
-import hashlib
 import os
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import text
 
 from api_schemas import AnalysisResponse, AnalyzeTextRequest
 from backend_service import analyze_candidates, extract_text_from_bytes
@@ -19,7 +19,7 @@ from platform_store import store
 from security import create_access_token, decode_access_token, hash_password, verify_password
 from responsible_ai import RESPONSIBLE_AI_NOTICE, evaluate_threshold
 from v14_schemas import AuditLogResponse, EvaluationRunRequest, EvaluationRunResponse
-from pydantic import BaseModel
+
 from v11_schemas import (
     ApplicationStatusRequest,
     AuthResponse,
@@ -33,32 +33,7 @@ from v11_schemas import (
     UserPublic,
 )
 
-
-class ResumeVersionResponse(BaseModel):
-    id: str
-    candidate_id: str
-    version_number: int
-    resume_filename: str
-    resume_hash: str | None = None
-    is_current: bool
-    created_at: str
-    updated_at: str
-
-
-class ResumeVersionListResponse(BaseModel):
-    candidate_id: str
-    versions: List[ResumeVersionResponse]
-
-
-class ResumeVersionComparisonResponse(BaseModel):
-    candidate_id: str
-    job_id: str | None = None
-    version1: Dict[str, Any]
-    version2: Dict[str, Any]
-    comparison: Dict[str, Any]
-
-
-API_VERSION = "v14"
+API_VERSION = "v15"
 security = HTTPBearer(auto_error=False)
 
 
@@ -70,7 +45,7 @@ def _cors_origins() -> List[str]:
 app = FastAPI(
     title="AI Resume Screening Platform API",
     description=(
-        "V14 FastAPI backend for the React recruiter workspace, with recruiter authentication, "
+        "V15 FastAPI backend for the React recruiter workspace, with recruiter authentication, "
         "job management, job-scoped candidate analysis, V9 explainability, V12 persistence, audit logs, and evaluation telemetry."
     ),
     version=API_VERSION,
@@ -125,6 +100,17 @@ def root():
 @app.get("/health", tags=["System"])
 def health():
     return {"status": "ok", "service": "cv-analyzer-api", "version": API_VERSION}
+
+
+@app.get("/health/ready", tags=["System"])
+def readiness():
+    """Readiness probe: verifies the API process and database connectivity."""
+    try:
+        with store.engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        return {"status": "ready", "database": "ok", "version": API_VERSION}
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Database not ready: {exc}") from exc
 
 
 @app.post("/api/v1/auth/register", response_model=AuthResponse, tags=["Authentication"])
@@ -224,73 +210,25 @@ async def analyze_job(
     if not 1 <= len(resumes) <= 50:
         raise HTTPException(status_code=400, detail="Provide 1-50 resume files.")
 
-    resume_payload: List[Tuple[str, str]] = []
-    resume_hash_by_filename: dict[str, str] = {}
-    duplicate_existing: List[dict] = []
-    duplicate_in_batch: dict[str, List[str]] = {}
-    seen_hashes: dict[str, str] = {}
-
+    resume_payload = []
     for resume in resumes:
         filename = resume.filename or "resume.txt"
         raw = await resume.read()
-        resume_hash = hashlib.sha256(raw).hexdigest()
-
-        # Exact same file uploaded twice in one request: keep the first copy.
-        first_filename = seen_hashes.get(resume_hash)
-        if first_filename:
-            duplicate_in_batch.setdefault(first_filename, []).append(filename)
-            continue
-        seen_hashes[resume_hash] = filename
-
         try:
             text = extract_text_from_bytes(filename, raw)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        if not text:
-            continue
-
-        # Exact same file already attached to this same job:
-        # don't run the expensive analysis again.
-        existing_candidate = store.get_candidate_by_resume_hash(
-            user["id"],
-            resume_hash,
-        )
-        if existing_candidate:
-            existing_application = store.get_application(
-                user["id"],
-                job_id,
-                existing_candidate["id"],
-            )
-            if existing_application:
-                existing_analysis = dict(existing_application.get("analysis") or {})
-                existing_analysis["duplicate_detection"] = {
-                    "is_duplicate": True,
-                    "reason": "same_resume_file",
-                    "message": "This exact resume file was already submitted for this job. Existing application retained.",
-                    "uploaded_filename": filename,
-                    "existing_application_id": existing_application.get("application_id"),
-                }
-                existing_application["analysis"] = existing_analysis
-                duplicate_existing.append(existing_application)
-                continue
-
-        resume_payload.append((filename, text))
-        resume_hash_by_filename[filename] = resume_hash
-
-    if not resume_payload and not duplicate_existing:
+        if text:
+            resume_payload.append((filename, text))
+    if not resume_payload:
         raise HTTPException(status_code=400, detail="No readable resumes were found.")
 
     try:
-        analysis = (
-            analyze_candidates(
-                job["description"],
-                resume_payload,
-                top_n_keywords=top_n_keywords,
-                include_raw_text=include_raw_text,
-            )
-            if resume_payload
-            else {"candidates": []}
+        analysis = analyze_candidates(
+            job["description"],
+            resume_payload,
+            top_n_keywords=top_n_keywords,
+            include_raw_text=include_raw_text,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -299,31 +237,6 @@ async def analyze_job(
 
     by_name = {item.get("resume_name"): item for item in analysis.get("candidates", [])}
     output: List[CandidateApplicationResponse] = []
-
-    # Existing duplicate applications are returned without re-analysis.
-    for existing_application in duplicate_existing:
-        output.append(
-            CandidateApplicationResponse(
-                application_id=existing_application["application_id"],
-                job_id=job_id,
-                candidate_id=existing_application["candidate_id"],
-                resume_version_id=existing_application.get("resume_version_id"),
-                resume_version_number=existing_application.get("resume_version_number"),
-                resume_version_filename=existing_application.get("resume_version_filename"),
-                resume_version_reused=True,
-                status=existing_application["status"],
-                name=existing_application.get("name", ""),
-                email=existing_application.get("email", ""),
-                phone=existing_application.get("phone", ""),
-                linkedin=existing_application.get("linkedin", ""),
-                github=existing_application.get("github", ""),
-                resume_filename=existing_application.get("resume_filename", ""),
-                analysis=existing_application.get("analysis", {}),
-                created_at=existing_application["created_at"],
-                updated_at=existing_application["updated_at"],
-            )
-        )
-
     for filename, resume_text in resume_payload:
         result = by_name.get(filename)
         if not result or result.get("error"):
@@ -338,48 +251,18 @@ async def analyze_job(
             github=contact.get("github", ""),
             resume_filename=filename,
             resume_text=resume_text,
-            resume_hash=resume_hash_by_filename.get(filename),
         )
         stored = dict(result)
-
-        skipped_duplicates = duplicate_in_batch.get(filename, [])
-        if skipped_duplicates:
-            stored["duplicate_detection"] = {
-                "is_duplicate": False,
-                "reason": "same_file_uploaded_multiple_times",
-                "message": "Duplicate upload(s) skipped. The resume was analyzed once.",
-                "skipped_filenames": skipped_duplicates,
-            }
-
         # Avoid storing raw resume text in the structured analysis JSON unless
         # the caller explicitly requested it.
         if not include_raw_text:
             stored.pop("resume_text", None)
-
-        resume_version = candidate.get("resume_version") or {}
-        resume_version_id = resume_version.get("id")
-        resume_version_number = resume_version.get("version_number")
-        resume_version_filename = resume_version.get("resume_filename")
-        resume_version_reused = bool(
-            candidate.get("resume_version_existing")
-        )
-
-        app_row = store.add_application(
-            job_id,
-            candidate["id"],
-            stored,
-            resume_version_id=resume_version_id,
-        )
-
+        app_row = store.add_application(job_id, candidate["id"], stored)
         output.append(
             CandidateApplicationResponse(
                 application_id=app_row["id"],
                 job_id=job_id,
                 candidate_id=candidate["id"],
-                resume_version_id=resume_version_id,
-                resume_version_number=resume_version_number,
-                resume_version_filename=resume_version_filename,
-                resume_version_reused=resume_version_reused,
                 status=app_row["status"],
                 name=candidate["name"],
                 email=candidate["email"],
@@ -404,70 +287,6 @@ def list_job_candidates(job_id: str, user: dict = Depends(get_current_user)) -> 
     get_owned_job(user, job_id)
     rows = store.list_applications(user["id"], job_id)
     return [CandidateApplicationResponse(**row) for row in rows]
-
-
-@app.get(
-    "/api/v1/candidates/{candidate_id}/resume-versions",
-    response_model=ResumeVersionListResponse,
-    tags=["Candidates"],
-)
-def list_candidate_resume_versions(
-    candidate_id: str,
-    user: dict = Depends(get_current_user),
-) -> ResumeVersionListResponse:
-    versions = store.list_resume_versions(
-        user["id"],
-        candidate_id,
-    )
-
-    return ResumeVersionListResponse(
-        candidate_id=candidate_id,
-        versions=[
-            ResumeVersionResponse(**version)
-            for version in versions
-        ],
-    )
-
-
-@app.get(
-    "/api/v1/candidates/{candidate_id}/resume-compare",
-    response_model=ResumeVersionComparisonResponse,
-    tags=["Candidates"],
-)
-def compare_candidate_resume_versions(
-    candidate_id: str,
-    version1: int,
-    version2: int,
-    job_id: str | None = None,
-    user: dict = Depends(get_current_user),
-) -> ResumeVersionComparisonResponse:
-    if version1 < 1 or version2 < 1:
-        raise HTTPException(
-            status_code=400,
-            detail="Resume version numbers must be positive.",
-        )
-
-    try:
-        result = store.compare_resume_versions(
-            user["id"],
-            candidate_id,
-            version1,
-            version2,
-            job_id=job_id,
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
-        ) from exc
-
-    if not result:
-        raise HTTPException(
-            status_code=404,
-            detail="Candidate or requested resume versions were not found.",
-        )
-
-    return ResumeVersionComparisonResponse(**result)
 
 
 @app.get("/api/v1/jobs/{job_id}/candidates/{candidate_id}", response_model=CandidateApplicationResponse, tags=["Candidates"])
@@ -591,8 +410,3 @@ async def analyze_files(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"File analysis failed: {exc}") from exc
-
-
-
-
-

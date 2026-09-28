@@ -1,4 +1,4 @@
-"""V12 persistence layer.
+﻿"""V12 persistence layer.
 
 Public method names intentionally match V11 so the FastAPI API contract does
 not need to change when moving from SQLite to PostgreSQL.
@@ -9,13 +9,23 @@ import os
 import uuid
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from database import SessionLocal, create_db_engine, get_database_url
-from models import Application, AuditLog, Base, Candidate, EvaluationRun, Job, User
+from models import (
+    Application,
+    AuditLog,
+    Base,
+    Candidate,
+    EvaluationRun,
+    Job,
+    ResumeVersion,
+    ResumeVersionAnalysis,
+    User,
+)
 
 
 def utc_now() -> str:
@@ -65,6 +75,7 @@ def _candidate(row: Candidate) -> Dict[str, Any]:
         "github": row.github,
         "resume_filename": row.resume_filename,
         "resume_text": row.resume_text,
+        "resume_hash": row.resume_hash,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }
@@ -83,6 +94,17 @@ def _application(row: Application, candidate: Candidate, *, include_resume_text:
         "application_id": row.id,
         "job_id": row.job_id,
         "candidate_id": row.candidate_id,
+        "resume_version_id": row.resume_version_id,
+        "resume_version_number": (
+            row.resume_version.version_number
+            if row.resume_version
+            else None
+        ),
+        "resume_version_filename": (
+            row.resume_version.resume_filename
+            if row.resume_version
+            else None
+        ),
         "status": row.status,
         "analysis": analysis if isinstance(analysis, dict) else {},
         "created_at": row.created_at,
@@ -143,6 +165,39 @@ class PlatformStore:
 
     def _session(self) -> Session:
         return self.SessionLocal()
+
+    def _upsert_resume_version_analysis(
+        self,
+        session,
+        *,
+        resume_version_id: str,
+        job_id: str,
+        analysis: Dict[str, Any],
+        now: str,
+    ) -> ResumeVersionAnalysis:
+        row = session.scalar(
+            select(ResumeVersionAnalysis).where(
+                ResumeVersionAnalysis.resume_version_id == resume_version_id,
+                ResumeVersionAnalysis.job_id == job_id,
+            )
+        )
+
+        if row:
+            row.analysis_json = analysis
+            row.updated_at = now
+            return row
+
+        row = ResumeVersionAnalysis(
+            id=str(uuid.uuid4()),
+            resume_version_id=resume_version_id,
+            job_id=job_id,
+            analysis_json=analysis,
+            created_at=now,
+            updated_at=now,
+        )
+
+        session.add(row)
+        return row
 
     def create_user(self, email: str, full_name: str, password_hash: str) -> Dict[str, Any]:
         row = User(
@@ -248,6 +303,36 @@ class PlatformStore:
         finally:
             session.close()
 
+    def get_candidate_by_resume_hash(
+        self,
+        owner_id: str,
+        resume_hash: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Return the owner's candidate matching any uploaded resume version hash."""
+        clean_hash = (resume_hash or "").strip().lower()
+        if not clean_hash:
+            return None
+
+        session = self._session()
+        try:
+            row = session.scalar(
+                select(Candidate)
+                .join(
+                    ResumeVersion,
+                    ResumeVersion.candidate_id == Candidate.id,
+                )
+                .where(
+                    Candidate.owner_id == owner_id,
+                    ResumeVersion.resume_hash == clean_hash,
+                )
+                .order_by(ResumeVersion.created_at.desc())
+                .limit(1)
+            )
+
+            return _candidate(row) if row else None
+        finally:
+            session.close()
+
     def upsert_candidate(
         self,
         owner_id: str,
@@ -259,72 +344,327 @@ class PlatformStore:
         github: str,
         resume_filename: str,
         resume_text: str,
+        resume_hash: str | None = None,
     ) -> Dict[str, Any]:
         session = self._session()
+
         try:
             clean_email = (email or "").strip().lower()
+            clean_hash = (resume_hash or "").strip().lower() or None
+
             row = None
-            if clean_email:
+
+            # ---------------------------------------------------------
+            # 1. Exact resume hash identity
+            # ---------------------------------------------------------
+            if clean_hash:
                 row = session.scalar(
                     select(Candidate)
-                    .where(Candidate.owner_id == owner_id, Candidate.email == clean_email)
+                    .join(
+                        ResumeVersion,
+                        ResumeVersion.candidate_id == Candidate.id,
+                    )
+                    .where(
+                        Candidate.owner_id == owner_id,
+                        ResumeVersion.resume_hash == clean_hash,
+                    )
+                    .order_by(ResumeVersion.created_at.desc())
+                    .limit(1)
+                )
+
+            # ---------------------------------------------------------
+            # 2. Fall back to candidate email identity
+            # ---------------------------------------------------------
+            if not row and clean_email:
+                row = session.scalar(
+                    select(Candidate)
+                    .where(
+                        Candidate.owner_id == owner_id,
+                        Candidate.email == clean_email,
+                    )
                     .order_by(Candidate.created_at.desc())
                 )
+
             now = utc_now()
+
+            # ---------------------------------------------------------
+            # 3. Existing candidate
+            # ---------------------------------------------------------
             if row:
                 row.name = (name or "").strip()
+                row.email = clean_email or row.email
                 row.phone = (phone or "").strip()
                 row.linkedin = (linkedin or "").strip()
                 row.github = (github or "").strip()
-                row.resume_filename = resume_filename
-                row.resume_text = resume_text
-                row.updated_at = now
-            else:
-                row = Candidate(
+
+                existing_version = None
+
+                if clean_hash:
+                    existing_version = session.scalar(
+                        select(ResumeVersion)
+                        .where(
+                            ResumeVersion.candidate_id == row.id,
+                            ResumeVersion.resume_hash == clean_hash,
+                        )
+                        .order_by(
+                            ResumeVersion.version_number.desc()
+                        )
+                        .limit(1)
+                    )
+
+                # -----------------------------------------------------
+                # Same resume already exists in this candidate's history
+                # -----------------------------------------------------
+                if existing_version:
+                    # Do NOT replace the current resume with an older one.
+                    row.updated_at = now
+
+                    session.commit()
+                    session.refresh(row)
+
+                    result = _candidate(row)
+                    result["resume_version"] = {
+                        "id": existing_version.id,
+                        "version_number": existing_version.version_number,
+                        "resume_filename": existing_version.resume_filename,
+                        "resume_hash": existing_version.resume_hash,
+                        "is_current": existing_version.is_current,
+                    }
+                    result["resume_version_existing"] = True
+
+                    return result
+
+                # -----------------------------------------------------
+                # New resume version for existing candidate
+                # -----------------------------------------------------
+                latest_version = session.scalar(
+                    select(func.max(ResumeVersion.version_number))
+                    .where(
+                        ResumeVersion.candidate_id == row.id
+                    )
+                )
+
+                next_version = (latest_version or 0) + 1
+
+                # Mark previous current version as historical.
+                current_versions = session.scalars(
+                    select(ResumeVersion)
+                    .where(
+                        ResumeVersion.candidate_id == row.id,
+                        ResumeVersion.is_current.is_(True),
+                    )
+                ).all()
+
+                for version in current_versions:
+                    version.is_current = False
+                    version.updated_at = now
+
+                new_version = ResumeVersion(
                     id=str(uuid.uuid4()),
-                    owner_id=owner_id,
-                    name=(name or "").strip(),
-                    email=clean_email,
-                    phone=(phone or "").strip(),
-                    linkedin=(linkedin or "").strip(),
-                    github=(github or "").strip(),
+                    candidate_id=row.id,
+                    version_number=next_version,
                     resume_filename=resume_filename,
                     resume_text=resume_text,
+                    resume_hash=clean_hash,
+                    is_current=True,
                     created_at=now,
                     updated_at=now,
                 )
-                session.add(row)
+
+                session.add(new_version)
+
+                # Candidate keeps the latest/current resume.
+                row.resume_filename = resume_filename
+                row.resume_text = resume_text
+                row.resume_hash = clean_hash
+                row.updated_at = now
+
+                session.commit()
+                session.refresh(row)
+                session.refresh(new_version)
+
+                result = _candidate(row)
+                result["resume_version"] = {
+                    "id": new_version.id,
+                    "version_number": new_version.version_number,
+                    "resume_filename": new_version.resume_filename,
+                    "resume_hash": new_version.resume_hash,
+                    "is_current": True,
+                }
+                result["resume_version_existing"] = False
+
+                return result
+
+            # ---------------------------------------------------------
+            # 4. Brand-new candidate
+            # ---------------------------------------------------------
+            row = Candidate(
+                id=str(uuid.uuid4()),
+                owner_id=owner_id,
+                name=(name or "").strip(),
+                email=clean_email,
+                phone=(phone or "").strip(),
+                linkedin=(linkedin or "").strip(),
+                github=(github or "").strip(),
+                resume_filename=resume_filename,
+                resume_text=resume_text,
+                resume_hash=clean_hash,
+                created_at=now,
+                updated_at=now,
+            )
+
+            session.add(row)
+            session.flush()
+
+            first_version = ResumeVersion(
+                id=str(uuid.uuid4()),
+                candidate_id=row.id,
+                version_number=1,
+                resume_filename=resume_filename,
+                resume_text=resume_text,
+                resume_hash=clean_hash,
+                is_current=True,
+                created_at=now,
+                updated_at=now,
+            )
+
+            session.add(first_version)
+
             session.commit()
             session.refresh(row)
-            return _candidate(row)
+            session.refresh(first_version)
+
+            result = _candidate(row)
+            result["resume_version"] = {
+                "id": first_version.id,
+                "version_number": 1,
+                "resume_filename": first_version.resume_filename,
+                "resume_hash": first_version.resume_hash,
+                "is_current": True,
+            }
+            result["resume_version_existing"] = False
+
+            return result
+
         finally:
             session.close()
 
-    def add_application(self, job_id: str, candidate_id: str, analysis: Dict[str, Any]) -> Dict[str, Any]:
+    def list_resume_versions(
+        self,
+        owner_id: str,
+        candidate_id: str,
+    ) -> List[Dict[str, Any]]:
+        """Return all resume versions for an owned candidate."""
         session = self._session()
+
+        try:
+            candidate = session.scalar(
+                select(Candidate).where(
+                    Candidate.id == candidate_id,
+                    Candidate.owner_id == owner_id,
+                )
+            )
+
+            if not candidate:
+                return []
+
+            rows = session.scalars(
+                select(ResumeVersion)
+                .where(
+                    ResumeVersion.candidate_id == candidate_id,
+                )
+                .order_by(
+                    ResumeVersion.version_number.asc()
+                )
+            ).all()
+
+            return [
+                {
+                    "id": row.id,
+                    "candidate_id": row.candidate_id,
+                    "version_number": row.version_number,
+                    "resume_filename": row.resume_filename,
+                    "resume_hash": row.resume_hash,
+                    "is_current": row.is_current,
+                    "created_at": row.created_at,
+                    "updated_at": row.updated_at,
+                }
+                for row in rows
+            ]
+
+        finally:
+            session.close()
+
+    def add_application(
+        self,
+        job_id: str,
+        candidate_id: str,
+        analysis: Dict[str, Any],
+        resume_version_id: str | None = None,
+    ) -> Dict[str, Any]:
+        session = self._session()
+
         try:
             row = session.scalar(
-                select(Application).where(Application.job_id == job_id, Application.candidate_id == candidate_id)
+                select(Application).where(
+                    Application.job_id == job_id,
+                    Application.candidate_id == candidate_id,
+                )
             )
+
             now = utc_now()
+
             if row:
                 row.analysis_json = analysis
+
+                if resume_version_id:
+                    row.resume_version_id = resume_version_id
+                    self._upsert_resume_version_analysis(
+                        session,
+                        resume_version_id=resume_version_id,
+                        job_id=job_id,
+                        analysis=analysis,
+                        now=now,
+                    )
+
                 row.updated_at = now
+
             else:
                 row = Application(
                     id=str(uuid.uuid4()),
                     job_id=job_id,
                     candidate_id=candidate_id,
+                    resume_version_id=resume_version_id,
                     status="new",
                     analysis_json=analysis,
                     created_at=now,
                     updated_at=now,
                 )
                 session.add(row)
+
+                if resume_version_id:
+                    self._upsert_resume_version_analysis(
+                        session,
+                        resume_version_id=resume_version_id,
+                        job_id=job_id,
+                        analysis=analysis,
+                        now=now,
+                    )
+
             session.commit()
             session.refresh(row)
+
             candidate = session.get(Candidate, candidate_id)
-            return _application(row, candidate or Candidate(id=candidate_id, name=""))
+
+            if not candidate:
+                raise ValueError("Candidate not found after application creation.")
+
+            return _application(
+                row,
+                candidate,
+                include_resume_text=False,
+            )
+
         finally:
             session.close()
 
@@ -385,6 +725,277 @@ class PlatformStore:
         finally:
             session.close()
         return self.get_application(owner_id, job_id, candidate_id)
+
+    def get_resume_version_analysis(
+        self,
+        owner_id: str,
+        resume_version_id: str,
+        job_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        session = self._session()
+
+        try:
+            row = session.scalar(
+                select(ResumeVersionAnalysis)
+                .join(
+                    ResumeVersion,
+                    ResumeVersion.id == ResumeVersionAnalysis.resume_version_id,
+                )
+                .join(
+                    Candidate,
+                    Candidate.id == ResumeVersion.candidate_id,
+                )
+                .where(
+                    Candidate.owner_id == owner_id,
+                    ResumeVersionAnalysis.resume_version_id == resume_version_id,
+                    ResumeVersionAnalysis.job_id == job_id,
+                )
+            )
+
+            if not row:
+                return None
+
+            analysis = row.analysis_json
+
+            if isinstance(analysis, str):
+                import json
+
+                try:
+                    analysis = json.loads(analysis)
+                except json.JSONDecodeError:
+                    analysis = {}
+
+            return {
+                "id": row.id,
+                "resume_version_id": row.resume_version_id,
+                "job_id": row.job_id,
+                "analysis": analysis if isinstance(analysis, dict) else {},
+                "created_at": row.created_at,
+                "updated_at": row.updated_at,
+            }
+
+        finally:
+            session.close()
+
+    def compare_resume_versions(
+        self,
+        owner_id: str,
+        candidate_id: str,
+        version1: int,
+        version2: int,
+        job_id: str | None = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Compare two resume versions, optionally for a specific job."""
+
+        if version1 == version2:
+            raise ValueError("version1 and version2 must be different.")
+
+        session = self._session()
+
+        try:
+            candidate = session.scalar(
+                select(Candidate).where(
+                    Candidate.id == candidate_id,
+                    Candidate.owner_id == owner_id,
+                )
+            )
+
+            if not candidate:
+                return None
+
+            versions = session.scalars(
+                select(ResumeVersion)
+                .where(
+                    ResumeVersion.candidate_id == candidate_id,
+                    ResumeVersion.version_number.in_([version1, version2]),
+                )
+                .order_by(ResumeVersion.version_number.asc())
+            ).all()
+
+            version_map = {row.version_number: row for row in versions}
+
+            first = version_map.get(version1)
+            second = version_map.get(version2)
+
+            if not first or not second:
+                return None
+
+            def extract_analysis_value(
+                analysis: dict,
+                *keys: str,
+            ) -> Any:
+                for key in keys:
+                    value = analysis.get(key)
+
+                    if value is not None:
+                        return value
+
+                nested_scores = analysis.get("scores")
+
+                if isinstance(nested_scores, dict):
+                    for key in keys:
+                        value = nested_scores.get(key)
+
+                        if value is not None:
+                            return value
+
+                return None
+
+            def extract_list(
+                analysis: dict,
+                *keys: str,
+            ) -> list:
+                for key in keys:
+                    value = analysis.get(key)
+
+                    if isinstance(value, list):
+                        return value
+
+                requirements = analysis.get("requirements")
+
+                if isinstance(requirements, dict):
+                    for key in keys:
+                        value = requirements.get(key)
+
+                        if isinstance(value, list):
+                            return value
+
+                return []
+
+            first_analysis = {}
+            second_analysis = {}
+
+            if job_id:
+                first_analysis_row = session.scalar(
+                    select(ResumeVersionAnalysis)
+                    .where(
+                        ResumeVersionAnalysis.resume_version_id == first.id,
+                        ResumeVersionAnalysis.job_id == job_id,
+                    )
+                )
+
+                second_analysis_row = session.scalar(
+                    select(ResumeVersionAnalysis)
+                    .where(
+                        ResumeVersionAnalysis.resume_version_id == second.id,
+                        ResumeVersionAnalysis.job_id == job_id,
+                    )
+                )
+
+                if first_analysis_row:
+                    first_analysis = (
+                        first_analysis_row.analysis_json
+                        if isinstance(first_analysis_row.analysis_json, dict)
+                        else {}
+                    )
+
+                if second_analysis_row:
+                    second_analysis = (
+                        second_analysis_row.analysis_json
+                        if isinstance(second_analysis_row.analysis_json, dict)
+                        else {}
+                    )
+
+            first_ats = extract_analysis_value(
+                first_analysis,
+                "ats_score",
+                "final_score",
+            )
+
+            second_ats = extract_analysis_value(
+                second_analysis,
+                "ats_score",
+                "final_score",
+            )
+
+            first_matched = {
+                str(x).strip()
+                for x in extract_list(
+                    first_analysis,
+                    "matched_skills",
+                    "required_matched",
+                )
+                if str(x).strip()
+            }
+
+            second_matched = {
+                str(x).strip()
+                for x in extract_list(
+                    second_analysis,
+                    "matched_skills",
+                    "required_matched",
+                )
+                if str(x).strip()
+            }
+
+            first_missing = {
+                str(x).strip()
+                for x in extract_list(
+                    first_analysis,
+                    "missing_skills",
+                    "required_missing",
+                )
+                if str(x).strip()
+            }
+
+            second_missing = {
+                str(x).strip()
+                for x in extract_list(
+                    second_analysis,
+                    "missing_skills",
+                    "required_missing",
+                )
+                if str(x).strip()
+            }
+
+            added_skills = sorted(second_matched - first_matched, key=str.lower)
+            removed_skills = sorted(first_matched - second_matched, key=str.lower)
+            newly_missing = sorted(second_missing - first_missing, key=str.lower)
+            resolved_missing = sorted(first_missing - second_missing, key=str.lower)
+
+            ats_change = None
+
+            if isinstance(first_ats, (int, float)) and isinstance(second_ats, (int, float)):
+                ats_change = float(second_ats) - float(first_ats)
+
+            return {
+                "candidate_id": candidate_id,
+                "job_id": job_id,
+                "version1": {
+                    "id": first.id,
+                    "version_number": first.version_number,
+                    "resume_filename": first.resume_filename,
+                    "resume_hash": first.resume_hash,
+                    "is_current": first.is_current,
+                    "created_at": first.created_at,
+                },
+                "version2": {
+                    "id": second.id,
+                    "version_number": second.version_number,
+                    "resume_filename": second.resume_filename,
+                    "resume_hash": second.resume_hash,
+                    "is_current": second.is_current,
+                    "created_at": second.created_at,
+                },
+                "comparison": {
+                    "ats_score": {
+                        "version1": first_ats,
+                        "version2": second_ats,
+                        "change": ats_change,
+                    },
+                    "skills": {
+                        "added": added_skills,
+                        "removed": removed_skills,
+                    },
+                    "missing_skills": {
+                        "resolved": resolved_missing,
+                        "newly_missing": newly_missing,
+                    },
+                },
+            }
+
+        finally:
+            session.close()
 
     def create_audit_log(
         self,
@@ -500,3 +1111,5 @@ class PlatformStore:
 
 # Keep the V11 import contract: api.py does `from platform_store import store`.
 store = PlatformStore()
+
+
