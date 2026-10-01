@@ -138,7 +138,7 @@ function LaunchPage({ onSignIn, onGetStarted }) {
           <div className="launch-v181-copy">
             <div className="launch-v181-kicker">
               <span>RECRUITER OS</span>
-              <b>V18.2</b>
+              <b>V18</b>
             </div>
             <h1>
               Turn a stack of resumes into a <em>clear hiring workspace.</em>
@@ -278,7 +278,7 @@ function Dashboard({ user, onLogout }) {
   const [candidateRows, setCandidateRows] = useState([])
   const [selectedCandidate, setSelectedCandidate] = useState(null)
   const [showCreate, setShowCreate] = useState(false)
-  const [activeView, setActiveView] = useState('home')
+  const [activeView, setActiveView] = useState('overview')
   const [creating, setCreating] = useState(false)
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState('')
@@ -289,99 +289,87 @@ function Dashboard({ user, onLogout }) {
     jobs: jobs.length,
     open: jobs.filter((j) => j.status === 'open').length,
     candidates: candidateRows.length,
-    shortlisted: candidateRows.filter((c) => c.status === 'shortlisted').length,
-    reviewing: candidateRows.filter((c) => c.status === 'reviewing').length,
-    newCandidates: candidateRows.filter((c) => c.status === 'new').length,
+    shortlisted: candidateRows.filter((c) => c.status === 'shortlisted').length
   }), [jobs, candidateRows])
 
   async function loadJobs(preselect = null) {
     try {
-      const rows = await api.jobs()
-      setJobs(rows)
+      const rows = await api.jobs(); setJobs(rows)
       const id = preselect || selectedJobId || rows[0]?.id || null
       setSelectedJobId(id)
-    } catch (err) {
-      setError(err.message)
-    }
+    } catch (err) { setError(err.message) }
   }
 
   async function loadCandidates(jobId) {
     if (!jobId) return setCandidateRows([])
-    try {
-      setCandidateRows(await api.candidates(jobId))
-    } catch (err) {
-      setError(err.message)
-    }
-  }
-
-  async function refreshAll() {
-    await loadJobs()
-    if (selectedJobId) {
-      await loadCandidates(selectedJobId)
-    }
+    try { setCandidateRows(await api.candidates(jobId)) } catch (err) { setError(err.message) }
   }
 
   useEffect(() => { loadJobs() }, [])
-  useEffect(() => {
-    loadCandidates(selectedJobId)
-    setSelectedCandidate(null)
-  }, [selectedJobId])
+  useEffect(() => { loadCandidates(selectedJobId); setSelectedCandidate(null) }, [selectedJobId])
 
   async function createJob(form) {
-    setCreating(true)
-    setError('')
-    try {
-      const job = await api.createJob(form)
-      await loadJobs(job.id)
-      setShowCreate(false)
-      setActiveView('overview')
-      setMessage('Job created. Your screening workspace is ready.')
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setCreating(false)
-    }
+    setCreating(true); setError('')
+    try { const job = await api.createJob(form); await loadJobs(job.id); setShowCreate(false); setMessage('Job created.') } catch(err) { setError(err.message) } finally { setCreating(false) }
   }
 
   async function uploadResumes(files) {
     if (!selectedJob) return
-    setBusy(true)
-    setError('')
-    setMessage('')
+    setBusy(true); setError(''); setMessage('')
     try {
       const result = await api.analyzeJob(selectedJob.id, files)
       setCandidateRows((prev) => mergeCandidates(prev, result))
 
       const newVersions = result.filter(
-        (item) => Number(item.resume_version_number) > 1 && !item.resume_version_reused
+        (item) =>
+          Number(item.resume_version_number) > 1 &&
+          !item.resume_version_reused
       )
-      const reusedVersions = result.filter((item) => item.resume_version_reused)
+
+      const reusedVersions = result.filter(
+        (item) => item.resume_version_reused
+      )
+
       const exactDuplicates = result.filter(
-        (item) => item.analysis?.duplicate_detection?.is_duplicate === true
+        (item) =>
+          item.analysis?.duplicate_detection?.is_duplicate === true
       )
+
       const messages = []
 
       if (newVersions.length) {
         const details = newVersions
-          .map((item) => `${item.name || 'Candidate'} → Resume v${item.resume_version_number}`)
+          .map(
+            (item) =>
+              `${item.name || 'Candidate'} → Resume v${item.resume_version_number}`
+          )
           .join(', ')
-        messages.push(`New resume version created: ${details}.`)
+
+        messages.push(
+          `New resume version created: ${details}.`
+        )
       }
+
       if (reusedVersions.length) {
-        messages.push(`${reusedVersions.length} existing resume version(s) reused.`)
+        messages.push(
+          `${reusedVersions.length} existing resume version(s) reused.`
+        )
       }
+
       if (exactDuplicates.length) {
-        messages.push(`${exactDuplicates.length} duplicate application(s) retained.`)
+        messages.push(
+          `${exactDuplicates.length} duplicate application(s) retained.`
+        )
       }
+
       if (!messages.length) {
-        messages.push(`${result.length} candidate application(s) analyzed.`)
+        messages.push(
+          `${result.length} candidate application(s) analyzed.`
+        )
       }
+
       setMessage(messages.join(' '))
-    } catch (err) {
-      setError(err.message)
-    } finally {
-      setBusy(false)
-    }
+    } catch (err) { setError(err.message) } finally { setBusy(false) }
   }
 
   async function updateStatus(candidateId, status) {
@@ -389,320 +377,48 @@ function Dashboard({ user, onLogout }) {
       const row = await api.updateCandidateStatus(selectedJob.id, candidateId, status)
       setCandidateRows((prev) => prev.map((x) => x.candidate_id === candidateId ? row : x))
       if (selectedCandidate?.candidate_id === candidateId) setSelectedCandidate(row)
-      return row
-    } catch (err) {
-      setError(err.message)
-      throw err
-    }
+    } catch(err) { setError(err.message) }
   }
 
   async function deleteSelectedJob() {
     if (!selectedJob || !confirm(`Delete ${selectedJob.title}?`)) return
-    try {
-      await api.deleteJob(selectedJob.id)
-      setSelectedJobId(null)
-      await loadJobs()
-      setActiveView('home')
-      setMessage('Job deleted.')
-    } catch (err) {
-      setError(err.message)
-    }
+    try { await api.deleteJob(selectedJob.id); setSelectedJobId(null); await loadJobs(); setMessage('Job deleted.') } catch(err) { setError(err.message) }
   }
 
-  function openJob(jobId) {
-    setSelectedJobId(jobId)
-    setActiveView('overview')
-  }
-
-  return (
-    <div className="app-shell v182-shell">
-      <header className="topbar v182-topbar">
-        <div className="topbar-left">
-          <div className="logo-mark small">CV</div>
-          <div>
-            <div className="top-title">CV Analyzer</div>
-            <div className="top-sub">Recruiter Command Center · V18.2</div>
-          </div>
-        </div>
-        <div className="topbar-right">
-          <span className="api-dot"><i /> API connected</span>
-          <button className="top-home" onClick={() => setActiveView('home')}>Home</button>
-          <span className="user-chip">{user.full_name}</span>
-          <button className="ghost" onClick={onLogout}>Log out</button>
-        </div>
-      </header>
-
-      <div className="body-grid v182-grid">
-        <aside className="sidebar v182-sidebar">
-          <div className="sidebar-brand-note">
-            <span>AI</span>
+  return <div className="app-shell">
+    <header className="topbar">
+      <div className="topbar-left"><div className="logo-mark small">CV</div><div><div className="top-title">CV Analyzer</div><div className="top-sub">Recruiter Command Center</div></div></div>
+      <div className="topbar-right"><span className="api-dot">● API connected</span><span className="user-chip">{user.full_name}</span><button className="ghost" onClick={onLogout}>Log out</button></div>
+    </header>
+    <div className="body-grid">
+      <aside className="sidebar">
+        <div className="side-section"><div className="side-label">WORKSPACE</div><button className={activeView==='overview'?'side-link active':'side-link'} onClick={() => setActiveView('overview')}>▦ Overview</button><button className={activeView==='insights'?'side-link active':'side-link'} onClick={() => setActiveView('insights')}>◫ Evaluation & Audit</button><button className="side-link" onClick={() => { setActiveView('overview'); setShowCreate(true) }}>＋ New job</button></div>
+        <div className="side-section"><div className="side-label">JOBS</div>{jobs.map(job => <button key={job.id} className={job.id === selectedJobId ? 'job-link selected' : 'job-link'} onClick={() => setSelectedJobId(job.id)}><span className={`status-dot ${job.status}`} /><span className="truncate">{job.title}</span></button>)}{jobs.length===0 && <div className="muted small-text">No jobs yet.</div>}</div>
+      </aside>
+      <main className="content">
+        {activeView === 'overview' ? <>
+          <section className="dashboard-hero-v181">
             <div>
-              <b>Recruiter OS</b>
-              <small>Reviewable decision support</small>
+              <span className="dashboard-eyebrow">RECRUITER COMMAND CENTER</span>
+              <h1>{user.full_name?.split(' ')[0] || 'Recruiter'}, your screening workspace is ready.</h1>
+              <p>Keep hiring work focused: create a job, upload resumes, inspect evidence and move candidates through the pipeline.</p>
             </div>
-          </div>
-
-          <div className="side-section">
-            <div className="side-label">WORKSPACE</div>
-            <button className={activeView === 'home' ? 'side-link active' : 'side-link'} onClick={() => setActiveView('home')}>⌂ <span>Home dashboard</span></button>
-            <button className={activeView === 'overview' ? 'side-link active' : 'side-link'} onClick={() => setActiveView('overview')}>▦ <span>Job workspace</span></button>
-            <button className={activeView === 'insights' ? 'side-link active' : 'side-link'} onClick={() => setActiveView('insights')}>◫ <span>Evaluation & Audit</span></button>
-            <button className="side-link" onClick={() => { setActiveView('overview'); setShowCreate(true) }}>＋ <span>New job</span></button>
-          </div>
-
-          <div className="side-section">
-            <div className="side-label">JOBS</div>
-            {jobs.map((job) => (
-              <button key={job.id} className={job.id === selectedJobId && activeView === 'overview' ? 'job-link selected' : 'job-link'} onClick={() => openJob(job.id)}>
-                <span className={`status-dot ${job.status}`} />
-                <span className="truncate">{job.title}</span>
-              </button>
-            ))}
-            {!jobs.length && <div className="muted small-text">No jobs yet.</div>}
-          </div>
-
-          <div className="sidebar-footer-card">
-            <span>TIP</span>
-            <p>Use Candidate 360 to inspect evidence, resume history and version changes before moving a candidate.</p>
-          </div>
-        </aside>
-
-        <main className="content v182-content">
+            <div className="dashboard-hero-actions">
+              <button className="primary" onClick={() => setShowCreate(true)}>＋ Create job</button>
+              {selectedJob && <div className="dashboard-hero-chip"><span>ACTIVE</span>{selectedJob.title}</div>}
+            </div>
+          </section>
+          <div className="page-head"><div><div className="eyebrow">RECRUITER DASHBOARD · V14</div><h1>{selectedJob ? selectedJob.title : 'Your workspace'}</h1><p>{selectedJob ? `${selectedJob.company || 'Company not specified'} · ${selectedJob.status}` : 'Create a job to start screening candidates.'}</p></div><div className="head-actions"><button className="secondary" onClick={() => loadJobs()}>↻ Refresh</button><button className="primary" onClick={() => setShowCreate(true)}>＋ New job</button></div></div>
           {error && <div className="error-box global">{error}<button onClick={() => setError('')}>×</button></div>}
           {message && <div className="success-box global">{message}<button onClick={() => setMessage('')}>×</button></div>}
-
-          {activeView === 'home' ? (
-            <HomeDashboard
-              user={user}
-              jobs={jobs}
-              selectedJob={selectedJob}
-              candidates={candidateRows}
-              stats={stats}
-              onCreate={() => setShowCreate(true)}
-              onOpenJob={() => selectedJob && openJob(selectedJob.id)}
-              onSelectJob={openJob}
-              onSelectCandidate={setSelectedCandidate}
-              onRefresh={refreshAll}
-              onInsights={() => setActiveView('insights')}
-            />
-          ) : activeView === 'overview' ? (
-            <>
-              <div className="page-head v182-page-head">
-                <div>
-                  <div className="eyebrow">SCREENING WORKSPACE · V18.2</div>
-                  <h1>{selectedJob ? selectedJob.title : 'Your workspace'}</h1>
-                  <p>{selectedJob ? `${selectedJob.company || 'Company not specified'} · ${selectedJob.status}` : 'Create a job to start screening candidates.'}</p>
-                </div>
-                <div className="head-actions">
-                  <button className="secondary" onClick={() => loadJobs()}>↻ Refresh</button>
-                  <button className="primary" onClick={() => setShowCreate(true)}>＋ New job</button>
-                </div>
-              </div>
-              <div className="stats-grid">
-                <Stat label="Jobs" value={stats.jobs} />
-                <Stat label="Open jobs" value={stats.open} />
-                <Stat label="Candidates in active job" value={stats.candidates} />
-                <Stat label="Shortlisted" value={stats.shortlisted} />
-              </div>
-              {selectedJob ? <JobWorkspace job={selectedJob} candidates={candidateRows} busy={busy} onUpload={uploadResumes} onStatus={updateStatus} onSelect={setSelectedCandidate} onDelete={deleteSelectedJob} /> : <EmptyState onCreate={() => setShowCreate(true)} />}
-            </>
-          ) : (
-            <InsightsWorkspace jobs={jobs} selectedJob={selectedJob} candidates={candidateRows} onJobChange={(id) => setSelectedJobId(id)} />
-          )}
-        </main>
-      </div>
-
-      {showCreate && <CreateJobModal onClose={() => setShowCreate(false)} onCreate={createJob} busy={creating} />}
-      {selectedCandidate && <CandidateDrawer row={selectedCandidate} onClose={() => setSelectedCandidate(null)} />}
+          <div className="stats-grid"><Stat label="Jobs" value={stats.jobs}/><Stat label="Open jobs" value={stats.open}/><Stat label="Candidates in job" value={stats.candidates}/><Stat label="Shortlisted" value={stats.shortlisted}/></div>
+          {selectedJob ? <JobWorkspace job={selectedJob} candidates={candidateRows} busy={busy} onUpload={uploadResumes} onStatus={updateStatus} onSelect={setSelectedCandidate} onDelete={deleteSelectedJob}/> : <EmptyState onCreate={() => setShowCreate(true)}/>} 
+        </> : <InsightsWorkspace jobs={jobs} selectedJob={selectedJob} candidates={candidateRows} onJobChange={(id)=>setSelectedJobId(id)} /> }
+      </main>
     </div>
-  )
-}
-
-function HomeDashboard({ user, jobs, selectedJob, candidates, stats, onCreate, onOpenJob, onSelectJob, onSelectCandidate, onRefresh, onInsights }) {
-  const funnel = STATUS_OPTIONS.map((status) => ({
-    status,
-    count: candidates.filter((candidate) => candidate.status === status).length,
-  }))
-  const maxFunnel = Math.max(1, ...funnel.map((item) => item.count))
-  const recentCandidates = [...candidates]
-    .sort((a, b) => new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0))
-    .slice(0, 5)
-
-  return (
-    <div className="home-v182">
-      <section className="home-hero-v182">
-        <div className="home-hero-copy-v182">
-          <div className="dashboard-eyebrow">RECRUITER COMMAND CENTER</div>
-          <h1>Good to see you, {user.full_name?.split(' ')[0] || 'Recruiter'}.</h1>
-          <p>See what needs attention, open your active job and move screening work forward from one focused workspace.</p>
-          <div className="home-hero-actions-v182">
-            <button className="hero-primary-v182" onClick={onCreate}>＋ Create new job</button>
-            <button className="hero-secondary-v182" onClick={onOpenJob} disabled={!selectedJob}>Open active job →</button>
-          </div>
-        </div>
-        <div className="home-hero-orbit-v182" aria-hidden="true">
-          <div className="orbit-ring ring-one"><span /></div>
-          <div className="orbit-ring ring-two"><span /></div>
-          <div className="orbit-core"><b>CV</b><small>AI</small></div>
-        </div>
-      </section>
-
-      <section className="home-kpi-grid-v182">
-        <HomeKpi icon="◈" label="Total jobs" value={stats.jobs} hint={`${stats.open} open`} />
-        <HomeKpi icon="◎" label="Current candidates" value={stats.candidates} hint="active job" />
-        <HomeKpi icon="↗" label="Shortlisted" value={stats.shortlisted} hint="in pipeline" />
-        <HomeKpi icon="◒" label="In review" value={stats.reviewing} hint="needs attention" />
-      </section>
-
-      <section className="home-main-grid-v182">
-        <div className="home-left-v182">
-          <section className="home-card-v182 active-job-card-v182">
-            <div className="home-card-head-v182">
-              <div>
-                <span className="home-card-kicker-v182">ACTIVE JOB</span>
-                <h2>{selectedJob?.title || 'No active job yet'}</h2>
-                <p>{selectedJob ? `${selectedJob.company || 'Company not specified'} · ${selectedJob.status}` : 'Create a job and start your screening pipeline.'}</p>
-              </div>
-              {selectedJob && <span className={`home-status-pill-v182 ${selectedJob.status}`}>{selectedJob.status}</span>}
-            </div>
-
-            {selectedJob ? (
-              <>
-                <div className="active-job-summary-v182">
-                  <div>
-                    <span>Screened</span>
-                    <b>{candidates.length}</b>
-                  </div>
-                  <div>
-                    <span>Shortlisted</span>
-                    <b>{stats.shortlisted}</b>
-                  </div>
-                  <div>
-                    <span>Reviewing</span>
-                    <b>{stats.reviewing}</b>
-                  </div>
-                </div>
-                <div className="active-job-jd-v182">{selectedJob.description}</div>
-                <div className="home-card-actions-v182">
-                  <button className="primary" onClick={onOpenJob}>Open screening workspace →</button>
-                  <button className="secondary" onClick={onRefresh}>Refresh data</button>
-                </div>
-              </>
-            ) : (
-              <div className="home-empty-v182">
-                <div className="home-empty-icon-v182">＋</div>
-                <div>
-                  <b>Your command center is ready.</b>
-                  <p>Create your first job to see candidate activity, funnel movement and screening insights here.</p>
-                </div>
-                <button className="primary" onClick={onCreate}>Create a job</button>
-              </div>
-            )}
-          </section>
-
-          <section className="home-card-v182">
-            <div className="home-card-head-v182 compact">
-              <div>
-                <span className="home-card-kicker-v182">RECENT CANDIDATES</span>
-                <h2>Latest screening activity</h2>
-              </div>
-              {selectedJob && <button className="link-button-v182" onClick={onOpenJob}>View all →</button>}
-            </div>
-            {recentCandidates.length ? (
-              <div className="recent-candidate-list-v182">
-                {recentCandidates.map((candidate) => {
-                  const ats = atsOf(candidate.analysis || {})
-                  return (
-                    <button className="recent-candidate-v182" key={candidate.candidate_id} onClick={() => onSelectCandidate(candidate)}>
-                      <span className="recent-avatar-v182">{(candidate.name || 'UC').split(' ').map((part) => part[0]).join('').slice(0,2).toUpperCase()}</span>
-                      <span className="recent-info-v182"><b>{candidate.name || 'Unnamed candidate'}</b><small>{candidate.email || candidate.resume_filename}</small></span>
-                      <span className={`recent-score-v182 ${scoreClass(ats)}`}>{ats == null ? '—' : `${ats.toFixed(1)}%`}</span>
-                      <span className={`recent-status-v182 ${candidate.status}`}>{candidate.status}</span>
-                    </button>
-                  )
-                })}
-              </div>
-            ) : (
-              <div className="muted home-empty-inline-v182">Upload resumes to populate recent screening activity.</div>
-            )}
-          </section>
-        </div>
-
-        <div className="home-right-v182">
-          <section className="home-card-v182">
-            <div className="home-card-head-v182 compact">
-              <div>
-                <span className="home-card-kicker-v182">HIRING FUNNEL</span>
-                <h2>Pipeline snapshot</h2>
-              </div>
-              <span className="funnel-job-label-v182">{selectedJob?.title || 'Active job'}</span>
-            </div>
-            <div className="funnel-v182">
-              {funnel.map((item) => (
-                <div className="funnel-row-v182" key={item.status}>
-                  <div className="funnel-meta-v182"><span>{item.status}</span><b>{item.count}</b></div>
-                  <div className="funnel-track-v182"><i style={{ width: `${item.count ? Math.max(8, (item.count / maxFunnel) * 100) : 0}%` }} /></div>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="home-card-v182 quick-actions-v182">
-            <div className="home-card-head-v182 compact">
-              <div>
-                <span className="home-card-kicker-v182">QUICK ACTIONS</span>
-                <h2>Jump back in</h2>
-              </div>
-            </div>
-            <div className="quick-action-grid-v182">
-              <QuickAction icon="＋" title="Create job" text="Start a new screening workspace." onClick={onCreate} />
-              <QuickAction icon="▦" title="Open workspace" text="Review candidates for the active job." onClick={onOpenJob} disabled={!selectedJob} />
-              <QuickAction icon="◫" title="Evaluation" text="Inspect audit and threshold telemetry." onClick={onInsights} />
-              <QuickAction icon="↻" title="Refresh" text="Reload jobs and current candidate data." onClick={onRefresh} />
-            </div>
-          </section>
-
-          <section className="home-card-v182 jobs-list-card-v182">
-            <div className="home-card-head-v182 compact">
-              <div>
-                <span className="home-card-kicker-v182">YOUR JOBS</span>
-                <h2>Workspace list</h2>
-              </div>
-              <span className="count-pill">{jobs.length}</span>
-            </div>
-            <div className="job-list-v182">
-              {jobs.length ? jobs.slice(0, 5).map((job) => (
-                <button key={job.id} className="job-list-row-v182" onClick={() => onSelectJob(job.id)}>
-                  <span className={`status-dot ${job.status}`} />
-                  <span className="job-list-copy-v182"><b>{job.title}</b><small>{job.company || 'Company not specified'}</small></span>
-                  <span className={`home-status-pill-v182 ${job.status}`}>{job.status}</span>
-                </button>
-              )) : <div className="muted home-empty-inline-v182">No jobs created yet.</div>}
-            </div>
-          </section>
-        </div>
-      </section>
-    </div>
-  )
-}
-
-function HomeKpi({ icon, label, value, hint }) {
-  return (
-    <div className="home-kpi-v182">
-      <span className="home-kpi-icon-v182">{icon}</span>
-      <div><span>{label}</span><b>{value}</b><small>{hint}</small></div>
-    </div>
-  )
-}
-
-function QuickAction({ icon, title, text, onClick, disabled = false }) {
-  return (
-    <button className="quick-action-v182" onClick={onClick} disabled={disabled}>
-      <span className="quick-action-icon-v182">{icon}</span>
-      <span><b>{title}</b><small>{text}</small></span>
-      <strong>→</strong>
-    </button>
-  )
+    {showCreate && <CreateJobModal onClose={() => setShowCreate(false)} onCreate={createJob} busy={creating}/>} 
+    {selectedCandidate && <CandidateDrawer row={selectedCandidate} onClose={() => setSelectedCandidate(null)} />}
+  </div>
 }
 
 function mergeCandidates(prev, next) {
@@ -717,292 +433,50 @@ function EmptyState({ onCreate }) { return <div className="empty-state"><div cla
 
 function JobWorkspace({ job, candidates, busy, onUpload, onStatus, onSelect, onDelete }) {
   const [tab, setTab] = useState('candidates')
-
-  return <div className="job-card pipeline-job-card-v183">
-    <div className="tabs bordered">
-      <button className={tab === 'candidates' ? 'tab active' : 'tab'} onClick={() => setTab('candidates')}>
-        Candidates <span className="count-pill">{candidates.length}</span>
-      </button>
-      <button className={tab === 'jd' ? 'tab active' : 'tab'} onClick={() => setTab('jd')}>Job description</button>
-      <button className={tab === 'settings' ? 'tab active' : 'tab'} onClick={() => setTab('settings')}>Settings</button>
-    </div>
-
-    {tab === 'candidates' && (
-      <div className="tab-content">
-        <div className="toolbar pipeline-toolbar-v183">
-          <div>
-            <div className="toolbar-kicker-v181">SCREENING WORKSPACE <span>LIVE</span></div>
-            <h3>Candidate pipeline</h3>
-            <p className="muted">Search, filter, sort, batch-update and move candidates through the recruiting pipeline.</p>
-          </div>
-          <label className={busy ? 'upload-btn disabled' : 'upload-btn'}>
-            {busy ? 'Analyzing…' : '＋ Upload resumes'}
-            <input type="file" multiple accept=".pdf,.docx,.txt,.md" disabled={busy} onChange={(e) => {
-              const files = [...e.target.files]
-              if (files.length) onUpload(files)
-              e.target.value = ''
-            }} />
-          </label>
-        </div>
-        <CandidatePipeline rows={candidates} onStatus={onStatus} onSelect={onSelect} />
-      </div>
-    )}
-
-    {tab === 'jd' && <div className="tab-content"><div className="jd-box">{job.description}</div></div>}
-
-    {tab === 'settings' && (
-      <div className="tab-content">
-        <div className="settings-row">
-          <div><h3>Job status</h3><p className="muted">Closed jobs cannot accept new resume analysis.</p></div>
-          <span className={`badge ${job.status}`}>{job.status}</span>
-        </div>
-        <div className="settings-row danger-row">
-          <div><h3>Delete this job</h3><p className="muted">This removes the job and its applications from the current account.</p></div>
-          <button className="danger" onClick={onDelete}>Delete job</button>
-        </div>
-      </div>
-    )}
+  return <div className="job-card">
+    <div className="tabs bordered"><button className={tab==='candidates'?'tab active':'tab'} onClick={()=>setTab('candidates')}>Candidates <span className="count-pill">{candidates.length}</span></button><button className={tab==='jd'?'tab active':'tab'} onClick={()=>setTab('jd')}>Job description</button><button className={tab==='settings'?'tab active':'tab'} onClick={()=>setTab('settings')}>Settings</button></div>
+    {tab==='candidates' && <div className="tab-content"><div className="toolbar"><div><div className="toolbar-kicker-v181">SCREENING WORKSPACE <span>LIVE</span></div><h3>Candidate pipeline</h3><p className="muted">Upload one or more resumes. The platform runs the existing ATS, requirements, semantic analysis and explainability pipeline.</p></div><label className={busy ? 'upload-btn disabled':'upload-btn'}>{busy ? 'Analyzing…' : '＋ Upload resumes'}<input type="file" multiple accept=".pdf,.docx,.txt,.md" disabled={busy} onChange={(e)=>{const files=[...e.target.files]; if(files.length) onUpload(files); e.target.value=''}}/></label></div><CandidateTable rows={candidates} onStatus={onStatus} onSelect={onSelect}/></div>}
+    {tab==='jd' && <div className="tab-content"><div className="jd-box">{job.description}</div></div>}
+    {tab==='settings' && <div className="tab-content"><div className="settings-row"><div><h3>Job status</h3><p className="muted">Closed jobs cannot accept new resume analysis.</p></div><span className={`badge ${job.status}`}>{job.status}</span></div><div className="settings-row danger-row"><div><h3>Delete this job</h3><p className="muted">This removes the job and its applications from the current account.</p></div><button className="danger" onClick={onDelete}>Delete job</button></div></div>}
   </div>
 }
 
-function CandidatePipeline({ rows, onStatus, onSelect }) {
+function CandidateTable({ rows, onStatus, onSelect }) {
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
-  const [scoreFilter, setScoreFilter] = useState('all')
-  const [sortBy, setSortBy] = useState('score_desc')
-  const [view, setView] = useState('list')
-  const [selectedIds, setSelectedIds] = useState([])
-  const [draggingId, setDraggingId] = useState(null)
-  const [bulkBusy, setBulkBusy] = useState(false)
 
-  const filteredRows = useMemo(() => {
-    const normalized = query.trim().toLowerCase()
-    const filtered = rows.filter((row) => {
-      const haystack = [row.name, row.email, row.resume_filename]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase()
-      const matchesQuery = !normalized || haystack.includes(normalized)
-      const matchesStatus = statusFilter === 'all' || row.status === statusFilter
-      const ats = atsOf(row.analysis || {})
-      const matchesScore = scoreFilter === 'all'
-        || (scoreFilter === '80plus' && ats != null && ats >= 80)
-        || (scoreFilter === '60to79' && ats != null && ats >= 60 && ats < 80)
-        || (scoreFilter === 'below60' && ats != null && ats < 60)
-        || (scoreFilter === 'unknown' && ats == null)
-      return matchesQuery && matchesStatus && matchesScore
-    })
-
-    return filtered.sort((a, b) => {
-      const aScore = atsOf(a.analysis || {})
-      const bScore = atsOf(b.analysis || {})
-      if (sortBy === 'score_desc') return (bScore ?? -1) - (aScore ?? -1)
-      if (sortBy === 'score_asc') return (aScore ?? 101) - (bScore ?? 101)
-      if (sortBy === 'name_asc') return (a.name || '').localeCompare(b.name || '')
-      if (sortBy === 'updated_desc') return new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0)
-      return 0
-    })
-  }, [rows, query, statusFilter, scoreFilter, sortBy])
-
-  useEffect(() => {
-    const valid = new Set(rows.map((row) => row.candidate_id))
-    setSelectedIds((prev) => prev.filter((id) => valid.has(id)))
-  }, [rows])
-
-  const allFilteredSelected = filteredRows.length > 0 && filteredRows.every((row) => selectedIds.includes(row.candidate_id))
-
-  function toggleSelected(candidateId) {
-    setSelectedIds((prev) => prev.includes(candidateId)
-      ? prev.filter((id) => id !== candidateId)
-      : [...prev, candidateId]
-    )
-  }
-
-  function toggleAllFiltered() {
-    const filteredIds = filteredRows.map((row) => row.candidate_id)
-    if (allFilteredSelected) {
-      setSelectedIds((prev) => prev.filter((id) => !filteredIds.includes(id)))
-    } else {
-      setSelectedIds((prev) => [...new Set([...prev, ...filteredIds])])
-    }
-  }
-
-  async function bulkStatus(status) {
-    if (!selectedIds.length) return
-    setBulkBusy(true)
-    try {
-      await Promise.all(selectedIds.map((id) => onStatus(id, status)))
-      setSelectedIds([])
-    } catch (_) {
-      // Individual status errors are already surfaced by the parent handler.
-    } finally {
-      setBulkBusy(false)
-    }
-  }
-
-  async function dropOnStatus(status) {
-    if (!draggingId) return
-    setDraggingId(null)
-    await onStatus(draggingId, status)
-  }
+  const filteredRows = rows.filter((row) => {
+    const haystack = [row.name, row.email, row.resume_filename]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
+    const matchesQuery = !query.trim() || haystack.includes(query.trim().toLowerCase())
+    const matchesStatus = statusFilter === 'all' || row.status === statusFilter
+    return matchesQuery && matchesStatus
+  })
 
   if (!rows.length) {
     return <div className="empty-table"><div className="empty-icon small">📄</div><h3>No candidates yet</h3><p className="muted">Upload resumes to run the screening pipeline.</p></div>
   }
 
-  return <div className="candidate-pipeline-v183">
-    <div className="pipeline-controls-v183">
-      <div className="candidate-search-wrap pipeline-search-v183">
+  return <div className="candidate-table-shell">
+    <div className="candidate-tools-v181">
+      <div className="candidate-search-wrap">
         <span>⌕</span>
         <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search candidate, email or file…" />
       </div>
-      <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} aria-label="Filter by status">
+      <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} aria-label="Filter candidates by status">
         <option value="all">All statuses</option>
         {STATUS_OPTIONS.map((status) => <option key={status} value={status}>{status}</option>)}
       </select>
-      <select value={scoreFilter} onChange={(e) => setScoreFilter(e.target.value)} aria-label="Filter by ATS score">
-        <option value="all">All scores</option>
-        <option value="80plus">80%+</option>
-        <option value="60to79">60–79%</option>
-        <option value="below60">Below 60%</option>
-        <option value="unknown">No score</option>
-      </select>
-      <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} aria-label="Sort candidates">
-        <option value="score_desc">Highest score</option>
-        <option value="score_asc">Lowest score</option>
-        <option value="name_asc">Name A–Z</option>
-        <option value="updated_desc">Recently updated</option>
-      </select>
-      <div className="pipeline-view-toggle-v183">
-        <button className={view === 'list' ? 'active' : ''} onClick={() => setView('list')} title="List view">☷</button>
-        <button className={view === 'board' ? 'active' : ''} onClick={() => setView('board')} title="Kanban view">▦</button>
-      </div>
+      <span className="result-count-v181">{filteredRows.length} of {rows.length}</span>
     </div>
 
-    <div className="pipeline-summary-v183">
-      <div><b>{filteredRows.length}</b><span>visible</span></div>
-      <div><b>{rows.length}</b><span>total</span></div>
-      <div><b>{selectedIds.length}</b><span>selected</span></div>
-      <button className="pipeline-clear-v183" onClick={() => { setQuery(''); setStatusFilter('all'); setScoreFilter('all'); }}>Clear filters</button>
-    </div>
-
-    {selectedIds.length > 0 && (
-      <div className="bulk-bar-v183">
-        <div><b>{selectedIds.length}</b> candidate{selectedIds.length === 1 ? '' : 's'} selected</div>
-        <div className="bulk-actions-v183">
-          <span className="bulk-label-v183">Move to</span>
-          {STATUS_OPTIONS.map((status) => (
-            <button key={status} className={`bulk-status-v183 ${status}`} onClick={() => bulkStatus(status)} disabled={bulkBusy}>
-              {status}
-            </button>
-          ))}
-          <button className="ghost" onClick={() => setSelectedIds([])} disabled={bulkBusy}>Clear</button>
-        </div>
-      </div>
-    )}
-
-    {view === 'list' ? (
-      filteredRows.length ? (
-        <div className="table-wrap candidate-list-table-v183">
-          <table>
-            <thead>
-              <tr>
-                <th className="check-cell-v183"><input type="checkbox" checked={allFilteredSelected} onChange={toggleAllFiltered} aria-label="Select all visible candidates" /></th>
-                <th>Candidate</th>
-                <th>ATS score</th>
-                <th>Requirement match</th>
-                <th>Resume</th>
-                <th>Status</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredRows.map((row) => {
-                const a = row.analysis || {}
-                const ats = atsOf(a)
-                const req = arrOf(a, 'required_matched').length
-                const reqTotal = a.requirement_counts?.required_total ?? a.requirements?.required_total ?? null
-                const selected = selectedIds.includes(row.candidate_id)
-                return <tr key={row.candidate_id} className={selected ? 'selected-row-v183' : ''}>
-                  <td className="check-cell-v183"><input type="checkbox" checked={selected} onChange={() => toggleSelected(row.candidate_id)} aria-label={`Select ${row.name || 'candidate'}`} /></td>
-                  <td>
-                    <button className="candidate-name" onClick={() => onSelect(row)}>{row.name || 'Unnamed candidate'}</button>
-                    <div className="candidate-meta">{row.email || row.resume_filename}</div>
-                  </td>
-                  <td><span className={`score-pill-v183 ${scoreClass(ats)}`}>{ats == null ? '—' : `${ats.toFixed(1)}%`}</span></td>
-                  <td>{reqTotal == null ? <span className="muted">See details</span> : <span className="req-count-v183">{req}/{reqTotal}</span>}</td>
-                  <td>
-                    <div className="resume-cell-v183">
-                      <span>{row.resume_filename || 'Resume'}</span>
-                      {row.resume_version_number != null && <small>v{row.resume_version_number}</small>}
-                    </div>
-                  </td>
-                  <td>
-                    <select value={row.status} onChange={(e) => onStatus(row.candidate_id, e.target.value)} aria-label={`Status for ${row.name || 'candidate'}`}>
-                      {STATUS_OPTIONS.map((status) => <option key={status} value={status}>{status}</option>)}
-                    </select>
-                  </td>
-                  <td><div className="pipeline-row-actions-v183"><button className="icon-btn" onClick={() => onSelect(row)}>View →</button></div></td>
-                </tr>
-              })}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <div className="filtered-empty-v181"><div>⌕</div><h3>No matching candidates</h3><p>Try a different search term, score range or status filter.</p></div>
-      )
+    {filteredRows.length ? (
+      <div className="table-wrap"><table><thead><tr><th>Candidate</th><th>ATS score</th><th>Requirement match</th><th>Status</th><th></th></tr></thead><tbody>{filteredRows.map(row => {const a=row.analysis||{}; const ats=atsOf(a); const req=arrOf(a,'required_matched').length; const reqTotal=(a.requirement_counts?.required_total ?? a.requirements?.required_total ?? null); return <tr key={row.candidate_id}><td><button className="candidate-name" onClick={()=>onSelect(row)}>{row.name || 'Unnamed candidate'}</button><div className="candidate-meta">{row.email || row.resume_filename}</div>{row.resume_version_number != null && (<div className="candidate-version-meta">Screened with Resume v{row.resume_version_number}</div>)}</td><td><span className={`score ${scoreClass(ats)}`}>{ats == null ? '—' : `${ats.toFixed(1)}%`}</span></td><td>{reqTotal == null ? <span className="muted">See details</span> : <span>{req}/{reqTotal}</span>}</td><td><select value={row.status} onChange={(e)=>onStatus(row.candidate_id,e.target.value)}>{STATUS_OPTIONS.map(s=><option key={s} value={s}>{s}</option>)}</select></td><td><div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}><button className="icon-btn" onClick={()=>onSelect(row)}>View →</button><button className="secondary" onClick={()=>onSelect(row)} style={{ padding: '8px 10px', fontSize: '12px' }}>Compare</button></div></td></tr>})}</tbody></table></div>
     ) : (
-      <CandidateKanban rows={filteredRows} selectedIds={selectedIds} onToggleSelected={toggleSelected} onSelect={onSelect} onDragStart={setDraggingId} onDrop={dropOnStatus} draggingId={draggingId} />
+      <div className="filtered-empty-v181"><div>⌕</div><h3>No matching candidates</h3><p>Try a different search term or status filter.</p></div>
     )}
-  </div>
-}
-
-function CandidateKanban({ rows, selectedIds, onToggleSelected, onSelect, onDragStart, onDrop, draggingId }) {
-  const columns = STATUS_OPTIONS.map((status) => ({
-    status,
-    rows: rows.filter((row) => row.status === status),
-  }))
-
-  return <div className="kanban-board-v183">
-    {columns.map(({ status, rows: columnRows }) => (
-      <section
-        key={status}
-        className={`kanban-column-v183 ${status}`}
-        onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('drag-over-v183') }}
-        onDragLeave={(e) => e.currentTarget.classList.remove('drag-over-v183')}
-        onDrop={(e) => { e.currentTarget.classList.remove('drag-over-v183'); onDrop(status) }}
-      >
-        <div className="kanban-column-head-v183">
-          <div><span className={`kanban-status-dot-v183 ${status}`} /><b>{status}</b></div>
-          <span>{columnRows.length}</span>
-        </div>
-        <div className="kanban-cards-v183">
-          {columnRows.map((row) => {
-            const ats = atsOf(row.analysis || {})
-            const selected = selectedIds.includes(row.candidate_id)
-            return <article
-              key={row.candidate_id}
-              className={`kanban-card-v183 ${selected ? 'selected' : ''} ${draggingId === row.candidate_id ? 'dragging' : ''}`}
-              draggable
-              onDragStart={() => onDragStart(row.candidate_id)}
-              onDragEnd={() => onDragStart(null)}
-            >
-              <div className="kanban-card-top-v183">
-                <input type="checkbox" checked={selected} onChange={() => onToggleSelected(row.candidate_id)} aria-label={`Select ${row.name || 'candidate'}`} />
-                <span className={`score-pill-v183 ${scoreClass(ats)}`}>{ats == null ? '—' : `${ats.toFixed(1)}%`}</span>
-              </div>
-              <button className="kanban-name-v183" onClick={() => onSelect(row)}>{row.name || 'Unnamed candidate'}</button>
-              <div className="candidate-meta">{row.email || row.resume_filename}</div>
-              <div className="kanban-card-footer-v183">
-                <span>{row.resume_version_number != null ? `Resume v${row.resume_version_number}` : 'Resume'}</span>
-                <button onClick={() => onSelect(row)}>View</button>
-              </div>
-            </article>
-          })}
-          {!columnRows.length && <div className="kanban-empty-v183">Drop candidates here</div>}
-        </div>
-      </section>
-    ))}
   </div>
 }
 

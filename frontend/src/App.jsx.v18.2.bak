@@ -389,10 +389,8 @@ function Dashboard({ user, onLogout }) {
       const row = await api.updateCandidateStatus(selectedJob.id, candidateId, status)
       setCandidateRows((prev) => prev.map((x) => x.candidate_id === candidateId ? row : x))
       if (selectedCandidate?.candidate_id === candidateId) setSelectedCandidate(row)
-      return row
     } catch (err) {
       setError(err.message)
-      throw err
     }
   }
 
@@ -717,292 +715,50 @@ function EmptyState({ onCreate }) { return <div className="empty-state"><div cla
 
 function JobWorkspace({ job, candidates, busy, onUpload, onStatus, onSelect, onDelete }) {
   const [tab, setTab] = useState('candidates')
-
-  return <div className="job-card pipeline-job-card-v183">
-    <div className="tabs bordered">
-      <button className={tab === 'candidates' ? 'tab active' : 'tab'} onClick={() => setTab('candidates')}>
-        Candidates <span className="count-pill">{candidates.length}</span>
-      </button>
-      <button className={tab === 'jd' ? 'tab active' : 'tab'} onClick={() => setTab('jd')}>Job description</button>
-      <button className={tab === 'settings' ? 'tab active' : 'tab'} onClick={() => setTab('settings')}>Settings</button>
-    </div>
-
-    {tab === 'candidates' && (
-      <div className="tab-content">
-        <div className="toolbar pipeline-toolbar-v183">
-          <div>
-            <div className="toolbar-kicker-v181">SCREENING WORKSPACE <span>LIVE</span></div>
-            <h3>Candidate pipeline</h3>
-            <p className="muted">Search, filter, sort, batch-update and move candidates through the recruiting pipeline.</p>
-          </div>
-          <label className={busy ? 'upload-btn disabled' : 'upload-btn'}>
-            {busy ? 'Analyzing…' : '＋ Upload resumes'}
-            <input type="file" multiple accept=".pdf,.docx,.txt,.md" disabled={busy} onChange={(e) => {
-              const files = [...e.target.files]
-              if (files.length) onUpload(files)
-              e.target.value = ''
-            }} />
-          </label>
-        </div>
-        <CandidatePipeline rows={candidates} onStatus={onStatus} onSelect={onSelect} />
-      </div>
-    )}
-
-    {tab === 'jd' && <div className="tab-content"><div className="jd-box">{job.description}</div></div>}
-
-    {tab === 'settings' && (
-      <div className="tab-content">
-        <div className="settings-row">
-          <div><h3>Job status</h3><p className="muted">Closed jobs cannot accept new resume analysis.</p></div>
-          <span className={`badge ${job.status}`}>{job.status}</span>
-        </div>
-        <div className="settings-row danger-row">
-          <div><h3>Delete this job</h3><p className="muted">This removes the job and its applications from the current account.</p></div>
-          <button className="danger" onClick={onDelete}>Delete job</button>
-        </div>
-      </div>
-    )}
+  return <div className="job-card">
+    <div className="tabs bordered"><button className={tab==='candidates'?'tab active':'tab'} onClick={()=>setTab('candidates')}>Candidates <span className="count-pill">{candidates.length}</span></button><button className={tab==='jd'?'tab active':'tab'} onClick={()=>setTab('jd')}>Job description</button><button className={tab==='settings'?'tab active':'tab'} onClick={()=>setTab('settings')}>Settings</button></div>
+    {tab==='candidates' && <div className="tab-content"><div className="toolbar"><div><div className="toolbar-kicker-v181">SCREENING WORKSPACE <span>LIVE</span></div><h3>Candidate pipeline</h3><p className="muted">Upload one or more resumes. The platform runs the existing ATS, requirements, semantic analysis and explainability pipeline.</p></div><label className={busy ? 'upload-btn disabled':'upload-btn'}>{busy ? 'Analyzing…' : '＋ Upload resumes'}<input type="file" multiple accept=".pdf,.docx,.txt,.md" disabled={busy} onChange={(e)=>{const files=[...e.target.files]; if(files.length) onUpload(files); e.target.value=''}}/></label></div><CandidateTable rows={candidates} onStatus={onStatus} onSelect={onSelect}/></div>}
+    {tab==='jd' && <div className="tab-content"><div className="jd-box">{job.description}</div></div>}
+    {tab==='settings' && <div className="tab-content"><div className="settings-row"><div><h3>Job status</h3><p className="muted">Closed jobs cannot accept new resume analysis.</p></div><span className={`badge ${job.status}`}>{job.status}</span></div><div className="settings-row danger-row"><div><h3>Delete this job</h3><p className="muted">This removes the job and its applications from the current account.</p></div><button className="danger" onClick={onDelete}>Delete job</button></div></div>}
   </div>
 }
 
-function CandidatePipeline({ rows, onStatus, onSelect }) {
+function CandidateTable({ rows, onStatus, onSelect }) {
   const [query, setQuery] = useState('')
   const [statusFilter, setStatusFilter] = useState('all')
-  const [scoreFilter, setScoreFilter] = useState('all')
-  const [sortBy, setSortBy] = useState('score_desc')
-  const [view, setView] = useState('list')
-  const [selectedIds, setSelectedIds] = useState([])
-  const [draggingId, setDraggingId] = useState(null)
-  const [bulkBusy, setBulkBusy] = useState(false)
 
-  const filteredRows = useMemo(() => {
-    const normalized = query.trim().toLowerCase()
-    const filtered = rows.filter((row) => {
-      const haystack = [row.name, row.email, row.resume_filename]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase()
-      const matchesQuery = !normalized || haystack.includes(normalized)
-      const matchesStatus = statusFilter === 'all' || row.status === statusFilter
-      const ats = atsOf(row.analysis || {})
-      const matchesScore = scoreFilter === 'all'
-        || (scoreFilter === '80plus' && ats != null && ats >= 80)
-        || (scoreFilter === '60to79' && ats != null && ats >= 60 && ats < 80)
-        || (scoreFilter === 'below60' && ats != null && ats < 60)
-        || (scoreFilter === 'unknown' && ats == null)
-      return matchesQuery && matchesStatus && matchesScore
-    })
-
-    return filtered.sort((a, b) => {
-      const aScore = atsOf(a.analysis || {})
-      const bScore = atsOf(b.analysis || {})
-      if (sortBy === 'score_desc') return (bScore ?? -1) - (aScore ?? -1)
-      if (sortBy === 'score_asc') return (aScore ?? 101) - (bScore ?? 101)
-      if (sortBy === 'name_asc') return (a.name || '').localeCompare(b.name || '')
-      if (sortBy === 'updated_desc') return new Date(b.updated_at || b.created_at || 0) - new Date(a.updated_at || a.created_at || 0)
-      return 0
-    })
-  }, [rows, query, statusFilter, scoreFilter, sortBy])
-
-  useEffect(() => {
-    const valid = new Set(rows.map((row) => row.candidate_id))
-    setSelectedIds((prev) => prev.filter((id) => valid.has(id)))
-  }, [rows])
-
-  const allFilteredSelected = filteredRows.length > 0 && filteredRows.every((row) => selectedIds.includes(row.candidate_id))
-
-  function toggleSelected(candidateId) {
-    setSelectedIds((prev) => prev.includes(candidateId)
-      ? prev.filter((id) => id !== candidateId)
-      : [...prev, candidateId]
-    )
-  }
-
-  function toggleAllFiltered() {
-    const filteredIds = filteredRows.map((row) => row.candidate_id)
-    if (allFilteredSelected) {
-      setSelectedIds((prev) => prev.filter((id) => !filteredIds.includes(id)))
-    } else {
-      setSelectedIds((prev) => [...new Set([...prev, ...filteredIds])])
-    }
-  }
-
-  async function bulkStatus(status) {
-    if (!selectedIds.length) return
-    setBulkBusy(true)
-    try {
-      await Promise.all(selectedIds.map((id) => onStatus(id, status)))
-      setSelectedIds([])
-    } catch (_) {
-      // Individual status errors are already surfaced by the parent handler.
-    } finally {
-      setBulkBusy(false)
-    }
-  }
-
-  async function dropOnStatus(status) {
-    if (!draggingId) return
-    setDraggingId(null)
-    await onStatus(draggingId, status)
-  }
+  const filteredRows = rows.filter((row) => {
+    const haystack = [row.name, row.email, row.resume_filename]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase()
+    const matchesQuery = !query.trim() || haystack.includes(query.trim().toLowerCase())
+    const matchesStatus = statusFilter === 'all' || row.status === statusFilter
+    return matchesQuery && matchesStatus
+  })
 
   if (!rows.length) {
     return <div className="empty-table"><div className="empty-icon small">📄</div><h3>No candidates yet</h3><p className="muted">Upload resumes to run the screening pipeline.</p></div>
   }
 
-  return <div className="candidate-pipeline-v183">
-    <div className="pipeline-controls-v183">
-      <div className="candidate-search-wrap pipeline-search-v183">
+  return <div className="candidate-table-shell">
+    <div className="candidate-tools-v181">
+      <div className="candidate-search-wrap">
         <span>⌕</span>
         <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search candidate, email or file…" />
       </div>
-      <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} aria-label="Filter by status">
+      <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} aria-label="Filter candidates by status">
         <option value="all">All statuses</option>
         {STATUS_OPTIONS.map((status) => <option key={status} value={status}>{status}</option>)}
       </select>
-      <select value={scoreFilter} onChange={(e) => setScoreFilter(e.target.value)} aria-label="Filter by ATS score">
-        <option value="all">All scores</option>
-        <option value="80plus">80%+</option>
-        <option value="60to79">60–79%</option>
-        <option value="below60">Below 60%</option>
-        <option value="unknown">No score</option>
-      </select>
-      <select value={sortBy} onChange={(e) => setSortBy(e.target.value)} aria-label="Sort candidates">
-        <option value="score_desc">Highest score</option>
-        <option value="score_asc">Lowest score</option>
-        <option value="name_asc">Name A–Z</option>
-        <option value="updated_desc">Recently updated</option>
-      </select>
-      <div className="pipeline-view-toggle-v183">
-        <button className={view === 'list' ? 'active' : ''} onClick={() => setView('list')} title="List view">☷</button>
-        <button className={view === 'board' ? 'active' : ''} onClick={() => setView('board')} title="Kanban view">▦</button>
-      </div>
+      <span className="result-count-v181">{filteredRows.length} of {rows.length}</span>
     </div>
 
-    <div className="pipeline-summary-v183">
-      <div><b>{filteredRows.length}</b><span>visible</span></div>
-      <div><b>{rows.length}</b><span>total</span></div>
-      <div><b>{selectedIds.length}</b><span>selected</span></div>
-      <button className="pipeline-clear-v183" onClick={() => { setQuery(''); setStatusFilter('all'); setScoreFilter('all'); }}>Clear filters</button>
-    </div>
-
-    {selectedIds.length > 0 && (
-      <div className="bulk-bar-v183">
-        <div><b>{selectedIds.length}</b> candidate{selectedIds.length === 1 ? '' : 's'} selected</div>
-        <div className="bulk-actions-v183">
-          <span className="bulk-label-v183">Move to</span>
-          {STATUS_OPTIONS.map((status) => (
-            <button key={status} className={`bulk-status-v183 ${status}`} onClick={() => bulkStatus(status)} disabled={bulkBusy}>
-              {status}
-            </button>
-          ))}
-          <button className="ghost" onClick={() => setSelectedIds([])} disabled={bulkBusy}>Clear</button>
-        </div>
-      </div>
-    )}
-
-    {view === 'list' ? (
-      filteredRows.length ? (
-        <div className="table-wrap candidate-list-table-v183">
-          <table>
-            <thead>
-              <tr>
-                <th className="check-cell-v183"><input type="checkbox" checked={allFilteredSelected} onChange={toggleAllFiltered} aria-label="Select all visible candidates" /></th>
-                <th>Candidate</th>
-                <th>ATS score</th>
-                <th>Requirement match</th>
-                <th>Resume</th>
-                <th>Status</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredRows.map((row) => {
-                const a = row.analysis || {}
-                const ats = atsOf(a)
-                const req = arrOf(a, 'required_matched').length
-                const reqTotal = a.requirement_counts?.required_total ?? a.requirements?.required_total ?? null
-                const selected = selectedIds.includes(row.candidate_id)
-                return <tr key={row.candidate_id} className={selected ? 'selected-row-v183' : ''}>
-                  <td className="check-cell-v183"><input type="checkbox" checked={selected} onChange={() => toggleSelected(row.candidate_id)} aria-label={`Select ${row.name || 'candidate'}`} /></td>
-                  <td>
-                    <button className="candidate-name" onClick={() => onSelect(row)}>{row.name || 'Unnamed candidate'}</button>
-                    <div className="candidate-meta">{row.email || row.resume_filename}</div>
-                  </td>
-                  <td><span className={`score-pill-v183 ${scoreClass(ats)}`}>{ats == null ? '—' : `${ats.toFixed(1)}%`}</span></td>
-                  <td>{reqTotal == null ? <span className="muted">See details</span> : <span className="req-count-v183">{req}/{reqTotal}</span>}</td>
-                  <td>
-                    <div className="resume-cell-v183">
-                      <span>{row.resume_filename || 'Resume'}</span>
-                      {row.resume_version_number != null && <small>v{row.resume_version_number}</small>}
-                    </div>
-                  </td>
-                  <td>
-                    <select value={row.status} onChange={(e) => onStatus(row.candidate_id, e.target.value)} aria-label={`Status for ${row.name || 'candidate'}`}>
-                      {STATUS_OPTIONS.map((status) => <option key={status} value={status}>{status}</option>)}
-                    </select>
-                  </td>
-                  <td><div className="pipeline-row-actions-v183"><button className="icon-btn" onClick={() => onSelect(row)}>View →</button></div></td>
-                </tr>
-              })}
-            </tbody>
-          </table>
-        </div>
-      ) : (
-        <div className="filtered-empty-v181"><div>⌕</div><h3>No matching candidates</h3><p>Try a different search term, score range or status filter.</p></div>
-      )
+    {filteredRows.length ? (
+      <div className="table-wrap"><table><thead><tr><th>Candidate</th><th>ATS score</th><th>Requirement match</th><th>Status</th><th></th></tr></thead><tbody>{filteredRows.map(row => {const a=row.analysis||{}; const ats=atsOf(a); const req=arrOf(a,'required_matched').length; const reqTotal=(a.requirement_counts?.required_total ?? a.requirements?.required_total ?? null); return <tr key={row.candidate_id}><td><button className="candidate-name" onClick={()=>onSelect(row)}>{row.name || 'Unnamed candidate'}</button><div className="candidate-meta">{row.email || row.resume_filename}</div>{row.resume_version_number != null && (<div className="candidate-version-meta">Screened with Resume v{row.resume_version_number}</div>)}</td><td><span className={`score ${scoreClass(ats)}`}>{ats == null ? '—' : `${ats.toFixed(1)}%`}</span></td><td>{reqTotal == null ? <span className="muted">See details</span> : <span>{req}/{reqTotal}</span>}</td><td><select value={row.status} onChange={(e)=>onStatus(row.candidate_id,e.target.value)}>{STATUS_OPTIONS.map(s=><option key={s} value={s}>{s}</option>)}</select></td><td><div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}><button className="icon-btn" onClick={()=>onSelect(row)}>View →</button><button className="secondary" onClick={()=>onSelect(row)} style={{ padding: '8px 10px', fontSize: '12px' }}>Compare</button></div></td></tr>})}</tbody></table></div>
     ) : (
-      <CandidateKanban rows={filteredRows} selectedIds={selectedIds} onToggleSelected={toggleSelected} onSelect={onSelect} onDragStart={setDraggingId} onDrop={dropOnStatus} draggingId={draggingId} />
+      <div className="filtered-empty-v181"><div>⌕</div><h3>No matching candidates</h3><p>Try a different search term or status filter.</p></div>
     )}
-  </div>
-}
-
-function CandidateKanban({ rows, selectedIds, onToggleSelected, onSelect, onDragStart, onDrop, draggingId }) {
-  const columns = STATUS_OPTIONS.map((status) => ({
-    status,
-    rows: rows.filter((row) => row.status === status),
-  }))
-
-  return <div className="kanban-board-v183">
-    {columns.map(({ status, rows: columnRows }) => (
-      <section
-        key={status}
-        className={`kanban-column-v183 ${status}`}
-        onDragOver={(e) => { e.preventDefault(); e.currentTarget.classList.add('drag-over-v183') }}
-        onDragLeave={(e) => e.currentTarget.classList.remove('drag-over-v183')}
-        onDrop={(e) => { e.currentTarget.classList.remove('drag-over-v183'); onDrop(status) }}
-      >
-        <div className="kanban-column-head-v183">
-          <div><span className={`kanban-status-dot-v183 ${status}`} /><b>{status}</b></div>
-          <span>{columnRows.length}</span>
-        </div>
-        <div className="kanban-cards-v183">
-          {columnRows.map((row) => {
-            const ats = atsOf(row.analysis || {})
-            const selected = selectedIds.includes(row.candidate_id)
-            return <article
-              key={row.candidate_id}
-              className={`kanban-card-v183 ${selected ? 'selected' : ''} ${draggingId === row.candidate_id ? 'dragging' : ''}`}
-              draggable
-              onDragStart={() => onDragStart(row.candidate_id)}
-              onDragEnd={() => onDragStart(null)}
-            >
-              <div className="kanban-card-top-v183">
-                <input type="checkbox" checked={selected} onChange={() => onToggleSelected(row.candidate_id)} aria-label={`Select ${row.name || 'candidate'}`} />
-                <span className={`score-pill-v183 ${scoreClass(ats)}`}>{ats == null ? '—' : `${ats.toFixed(1)}%`}</span>
-              </div>
-              <button className="kanban-name-v183" onClick={() => onSelect(row)}>{row.name || 'Unnamed candidate'}</button>
-              <div className="candidate-meta">{row.email || row.resume_filename}</div>
-              <div className="kanban-card-footer-v183">
-                <span>{row.resume_version_number != null ? `Resume v${row.resume_version_number}` : 'Resume'}</span>
-                <button onClick={() => onSelect(row)}>View</button>
-              </div>
-            </article>
-          })}
-          {!columnRows.length && <div className="kanban-empty-v183">Drop candidates here</div>}
-        </div>
-      </section>
-    ))}
   </div>
 }
 
