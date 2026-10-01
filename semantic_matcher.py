@@ -24,8 +24,21 @@ Important:
 from typing import Dict, List, Tuple
 
 import numpy as np
-import streamlit as st
 from sentence_transformers import SentenceTransformer
+from functools import lru_cache
+
+try:
+    from streamlit import cache_resource
+except ModuleNotFoundError:
+    def cache_resource(func=None, **kwargs):
+        def decorator(target):
+            return lru_cache(maxsize=1)(target)
+
+        if func is not None:
+            return decorator(func)
+
+        return decorator
+
 
 
 # ============================================================
@@ -43,7 +56,7 @@ MAX_CHARACTERS = 10000
 # CACHED MODEL
 # ============================================================
 
-@st.cache_resource(
+@cache_resource(
     show_spinner="Loading semantic AI model..."
 )
 def get_model() -> SentenceTransformer:

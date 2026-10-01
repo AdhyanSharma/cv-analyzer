@@ -249,28 +249,6 @@ class PlatformStore:
         finally:
             session.close()
 
-    def get_candidate_by_resume_hash(
-        self,
-        owner_id: str,
-        resume_hash: str,
-    ) -> Optional[Dict[str, Any]]:
-        """Return the owner's candidate matching an exact uploaded-file hash."""
-        clean_hash = (resume_hash or "").strip().lower()
-        if not clean_hash:
-            return None
-
-        session = self._session()
-        try:
-            row = session.scalar(
-                select(Candidate).where(
-                    Candidate.owner_id == owner_id,
-                    Candidate.resume_hash == clean_hash,
-                )
-            )
-            return _candidate(row) if row else None
-        finally:
-            session.close()
-
     def upsert_candidate(
         self,
         owner_id: str,
@@ -282,46 +260,25 @@ class PlatformStore:
         github: str,
         resume_filename: str,
         resume_text: str,
-        resume_hash: str | None = None,
     ) -> Dict[str, Any]:
         session = self._session()
         try:
             clean_email = (email or "").strip().lower()
-            clean_hash = (resume_hash or "").strip().lower() or None
-
-            # Exact-file identity wins over email identity.
             row = None
-            if clean_hash:
+            if clean_email:
                 row = session.scalar(
                     select(Candidate)
-                    .where(
-                        Candidate.owner_id == owner_id,
-                        Candidate.resume_hash == clean_hash,
-                    )
+                    .where(Candidate.owner_id == owner_id, Candidate.email == clean_email)
                     .order_by(Candidate.created_at.desc())
                 )
-
-            if not row and clean_email:
-                row = session.scalar(
-                    select(Candidate)
-                    .where(
-                        Candidate.owner_id == owner_id,
-                        Candidate.email == clean_email,
-                    )
-                    .order_by(Candidate.created_at.desc())
-                )
-
             now = utc_now()
             if row:
                 row.name = (name or "").strip()
-                row.email = clean_email or row.email
                 row.phone = (phone or "").strip()
                 row.linkedin = (linkedin or "").strip()
                 row.github = (github or "").strip()
                 row.resume_filename = resume_filename
                 row.resume_text = resume_text
-                if clean_hash:
-                    row.resume_hash = clean_hash
                 row.updated_at = now
             else:
                 row = Candidate(
@@ -334,12 +291,10 @@ class PlatformStore:
                     github=(github or "").strip(),
                     resume_filename=resume_filename,
                     resume_text=resume_text,
-                    resume_hash=clean_hash,
                     created_at=now,
                     updated_at=now,
                 )
                 session.add(row)
-
             session.commit()
             session.refresh(row)
             return _candidate(row)
@@ -546,5 +501,4 @@ class PlatformStore:
 
 # Keep the V11 import contract: api.py does `from platform_store import store`.
 store = PlatformStore()
-
 

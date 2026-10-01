@@ -317,16 +317,6 @@ async def analyze_job(
             resume_hash=resume_hash_by_filename.get(filename),
         )
         stored = dict(result)
-
-        skipped_duplicates = duplicate_in_batch.get(filename, [])
-        if skipped_duplicates:
-            stored["duplicate_detection"] = {
-                "is_duplicate": False,
-                "reason": "same_file_uploaded_multiple_times",
-                "message": "Duplicate upload(s) skipped. The resume was analyzed once.",
-                "skipped_filenames": skipped_duplicates,
-            }
-
         # Avoid storing raw resume text in the structured analysis JSON unless
         # the caller explicitly requested it.
         if not include_raw_text:
@@ -484,7 +474,6 @@ async def analyze_files(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"File analysis failed: {exc}") from exc
-
 
 
 

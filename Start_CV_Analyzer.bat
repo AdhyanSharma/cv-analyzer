@@ -1,95 +1,62 @@
 @echo off
 setlocal
+title CV Analyzer V18.3
 
-title CV Analyzer - Launch
-set "PROJECT=C:\Users\ASUS\CV Analyzer"
-set "DOCKER_DESKTOP=%LOCALAPPDATA%\Programs\DockerDesktop\Docker Desktop.exe"
-set "FRONTEND_URL=http://localhost:8081"
-
-cd /d "%PROJECT%" || (
-  echo Project folder not found: %PROJECT%
-  pause
-  exit /b 1
-)
+cd /d "C:\Users\ASUS\CV Analyzer"
 
 echo.
 echo =============================================
-echo          CV ANALYZER V18.3 - LAUNCHING
+echo       CV ANALYZER V18.3 - LAUNCHING
 echo =============================================
 echo.
-
 echo Checking Docker engine...
+
 docker info >nul 2>&1
-if errorlevel 1 (
-  echo Docker engine is not running. Starting Docker Desktop...
-  if not exist "%DOCKER_DESKTOP%" (
-    echo Docker Desktop not found:
-    echo %DOCKER_DESKTOP%
-    pause
-    exit /b 1
-  )
-  start "" "%DOCKER_DESKTOP%"
+if not errorlevel 1 goto START_PROJECT
 
-  set /a ATTEMPTS=0
-  :WAIT_DOCKER
-  timeout /t 3 /nobreak >nul
-  docker info >nul 2>&1
-  if not errorlevel 1 goto DOCKER_READY
-  set /a ATTEMPTS+=1
-  if %ATTEMPTS% GEQ 20 goto DOCKER_TIMEOUT
-  goto WAIT_DOCKER
-)
+echo Docker is not running. Starting Docker Desktop...
+start "" "%LOCALAPPDATA%\Programs\DockerDesktop\Docker Desktop.exe"
 
-:DOCKER_READY
-echo Docker engine ready.
-echo Starting CV Analyzer containers...
+echo Waiting for Docker engine...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ok=$false; for($i=0;$i -lt 30;$i++){Start-Sleep -Seconds 2; docker info *> $null; if($LASTEXITCODE -eq 0){$ok=$true;break}}; if(-not $ok){exit 1}"
+
+if errorlevel 1 goto DOCKER_ERROR
+
+:START_PROJECT
+echo Docker engine is ready.
+echo.
+echo Starting CV Analyzer...
 docker compose up -d
-if errorlevel 1 (
-  echo.
-  echo Docker Compose failed.
-  docker compose ps
-  pause
-  exit /b 1
-)
+
+if errorlevel 1 goto COMPOSE_ERROR
 
 echo.
-echo Waiting for the website to respond...
-set /a SITE_ATTEMPTS=0
-:WAIT_SITE
-timeout /t 2 /nobreak >nul
-curl.exe -fsS "%FRONTEND_URL%" >nul 2>&1
-if not errorlevel 1 goto SITE_READY
-set /a SITE_ATTEMPTS+=1
-if %SITE_ATTEMPTS% GEQ 30 goto SITE_TIMEOUT
-goto WAIT_SITE
-
-:SITE_READY
-echo CV Analyzer is ready.
-start "" "%FRONTEND_URL%"
-
-echo.
-echo =============================================
-echo Frontend: %FRONTEND_URL%
-echo API:      http://localhost:8000
-echo Health:   http://localhost:8000/health
-echo =============================================
-echo.
+echo Services started.
 docker compose ps
+
+echo.
+echo Opening CV Analyzer...
+timeout /t 3 /nobreak >nul
+start "" "http://localhost:8081"
+
+echo.
+echo =============================================
+echo       CV ANALYZER IS RUNNING
+echo       http://localhost:8081
+echo =============================================
+echo.
 pause
 exit /b 0
 
-:DOCKER_TIMEOUT
+:DOCKER_ERROR
 echo.
-echo Docker engine did not become ready within 60 seconds.
-echo Open Docker Desktop and try again.
+echo ERROR: Docker engine did not become ready.
 pause
 exit /b 1
 
-:SITE_TIMEOUT
+:COMPOSE_ERROR
 echo.
-echo Containers started, but the frontend did not respond within 60 seconds.
-echo Check: docker compose ps
-echo Check logs: docker compose logs -f frontend
-start "" "%FRONTEND_URL%"
+echo ERROR: Docker Compose failed.
+docker compose ps
 pause
 exit /b 1
