@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from typing import List, Optional, Tuple
+from typing import Any, List, Optional, Tuple, Dict
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -58,7 +58,9 @@ class ResumeVersionComparisonResponse(BaseModel):
     comparison: Dict[str, Any]
 
 
-API_VERSION = "v14"
+ResumeVersionComparisonResponse.model_rebuild(force=True)
+
+API_VERSION = "v15"
 security = HTTPBearer(auto_error=False)
 
 
@@ -591,6 +593,9 @@ async def analyze_files(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"File analysis failed: {exc}") from exc
+
+
+
 
 
 
